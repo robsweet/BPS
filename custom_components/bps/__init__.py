@@ -125,31 +125,72 @@ async def update_receiver_radii(hass, eids):
                 pass
 
 async def update_trilateration_and_zone(hass, new_global_data, entity):
-    """Performs trilateration and updates sensors with zone and floor"""
+    """Trilateration with r-value filtering and moving average filtering."""
     global apitricords
+    filter_percent = 0.5  # 50% change in r-value
+    filter_value_high = 1 * (1 + filter_percent)
+    filter_value_low = 1 * (1 - filter_percent)
+
+    # Store last r-values per sensor and entity
+    if not hasattr(update_trilateration_and_zone, "last_r_values"):
+        update_trilateration_and_zone.last_r_values = {}
+    # Store last positions for moving average filtering
+    if not hasattr(update_trilateration_and_zone, "position_history"):
+        update_trilateration_and_zone.position_history = {}
+
     lowest_floor_name, filtered_cords = extract_floor_and_receivers(new_global_data, entity)
-    tricords = trilaterate(filtered_cords)
+    # filtered_cords: list of (x, y, r)
+
+    # Get previous r-values for this entity
+    last_r = update_trilateration_and_zone.last_r_values.get(entity, {})
+
+    # Filter out points where r has changed too much
+    filtered = []
+    for idx, (x, y, r) in enumerate(filtered_cords):
+        key = (x, y)  # or receiver-id if available
+        prev_r = last_r.get(key)
+        if prev_r is not None:
+            if r > prev_r * filter_value_high or r < prev_r * filter_value_low:  # e.g. max 100% change
+                continue  # skip this point
+        filtered.append((x, y, r))
+
+    # Store current r-values for next time
+    update_trilateration_and_zone.last_r_values[entity] = {(x, y): r for (x, y, r) in filtered_cords}
+
+    if len(filtered) < 3:
+        # Too few points left for trilateration
+        return
+
+    tricords = trilaterate(filtered)
     if tricords is not None:
-        test_point = Point(float(tricords[0]), float(tricords[1]))
+        # Moving average filtering
+        history = update_trilateration_and_zone.position_history.setdefault(entity, [])
+        history.append(tricords)
+        if len(history) > 3:  # Keep only the last 3 positions
+            history.pop(0)
+        avg_x = sum(pos[0] for pos in history) / len(history)
+        avg_y = sum(pos[1] for pos in history) / len(history)
+
+        test_point = Point(float(avg_x), float(avg_y))
         zone = find_zone_for_point(new_global_data, entity, lowest_floor_name, test_point)
-        apitricords = update_or_add_entry(apitricords, {"ent": entity, "cords": tricords, "zone": zone})
+        apitricords = update_or_add_entry(apitricords, {"ent": entity, "cords": [avg_x, avg_y], "zone": zone})
         await update_apitricords(hass, apitricords)
         hass.states.async_set(f"sensor.{entity}_bps_zone", zone)
         hass.states.async_set(f"sensor.{entity}_bps_floor", lowest_floor_name)
 
 def update_or_add_entry(data, new_entry):
     for item in data:
-        if item["ent"] == new_entry["ent"]:  # Kolla om "ent" redan finns
-            item["cords"] = new_entry["cords"]  # Uppdatera "cords"
-            item["zone"] = new_entry["zone"]  # Uppdatera "zone"
+        if item["ent"] == new_entry["ent"]:  # Check if "ent" already exists
+            item["cords"] = new_entry["cords"]  # Update "cords"
+            item["zone"] = new_entry["zone"]  # Update "zone"
             return data
 
-    # Om "ent" inte hittades, lägg till som ny post
+    # If "ent" was not found, add as new post
     data.append(new_entry)
     return data
 
 async def update_apitricords(hass, new_data):
-    """Uppdatera apitricords i hass.data"""
+    """Update apitricords in hass.data"""
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN]["apitricords"] = new_data
 
@@ -181,15 +222,30 @@ def extract_floor_and_receivers(new_global_data, tmpentity):
     return lowest_floor_name, filtered_cords
 
 def find_zone_for_point(data, entity, floor_name, point):
-    """Find the zone containing a point."""
+    """Find zone for point, prioritize correct polygon, select nearest buffer if no correct zone matches."""
+    buffer_percent = 0.05  # set to 5%
+    buffer_candidates = []
     for entity_data in data:
         if entity_data["entity"] == entity:
             for floor in entity_data["data"]["floor"]:
                 if floor["name"] == floor_name:
                     for zone in floor["zones"]:
                         polygon = Polygon([(coord["x"], coord["y"]) for coord in zone["cords"]])
+                        xs = [coord["x"] for coord in zone["cords"]]
+                        ys = [coord["y"] for coord in zone["cords"]]
+                        width = max(xs) - min(xs)
+                        height = max(ys) - min(ys)
+                        buffer_size = ((width + height) / 2) * buffer_percent
                         if polygon.contains(point):
-                            return zone["entity_id"]
+                            return zone["entity_id"]  # Prioritize correct polygon
+                        elif polygon.buffer(buffer_size).contains(point):
+                            # Save candidate: (distance to edge, entity_id)
+                            distance_to_edge = polygon.exterior.distance(point)
+                            buffer_candidates.append((distance_to_edge, zone["entity_id"]))
+    if buffer_candidates:
+        # Select zone whose edge is closest to the point
+        buffer_candidates.sort()
+        return buffer_candidates[0][1]
     return "unknown"
 
 async def async_setup(hass, config):
