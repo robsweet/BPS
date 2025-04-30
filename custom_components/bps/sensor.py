@@ -50,15 +50,17 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     new_sensors = []
     for entity in entities:
         unique_zone_id = f"sensor.{entity}_bps_zone"
+        unique_zone_uid = f"bps_zone_{entity}"
         unique_floor_id = f"sensor.{entity}_bps_floor"
+        unique_floor_uid = f"bps_floor_{entity}"
 
         if not any(s.startswith(unique_zone_id) for s in existing_sensors):
-            sensor = CustomDistanceSensor(f"{entity} BPS Zone", unique_zone_id)
+            sensor = CustomDistanceSensor(f"{entity} BPS Zone", unique_zone_uid)
             hass.data["bps_sensors"][unique_zone_id] = sensor
             new_sensors.append(sensor)
 
         if not any(s.startswith(unique_floor_id) for s in existing_sensors):
-            sensor = CustomDistanceSensor(f"{entity} BPS Floor", unique_floor_id)
+            sensor = CustomDistanceSensor(f"{entity} BPS Floor", unique_floor_uid)
             hass.data["bps_sensors"][unique_floor_id] = sensor
             new_sensors.append(sensor)
 
@@ -75,15 +77,17 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
 
         for entity in new_entities:
             unique_zone_id = f"sensor.{entity}_bps_zone"
+            unique_zone_uid = f"bps_zone_{entity}"
             unique_floor_id = f"sensor.{entity}_bps_floor"
+            unique_floor_uid = f"bps_floor_{entity}"
 
             if not any(s.startswith(unique_zone_id) for s in existing_sensors):
-                sensor = CustomDistanceSensor(f"{entity} BPS Zone", unique_zone_id)
+                sensor = CustomDistanceSensor(f"{entity} BPS Zone", unique_zone_uid)
                 hass.data["bps_sensors"][unique_zone_id] = sensor
                 new_sensors.append(sensor)
 
             if not any(s.startswith(unique_floor_id) for s in existing_sensors):
-                sensor = CustomDistanceSensor(f"{entity} BPS Floor", unique_floor_id)
+                sensor = CustomDistanceSensor(f"{entity} BPS Floor", unique_floor_uid)
                 hass.data["bps_sensors"][unique_floor_id] = sensor
                 new_sensors.append(sensor)
 
