@@ -10,6 +10,21 @@ const hass_token = "";
 //Example2: const hassURL = "192.168.0.10:8123";
 const hassURL = "";
 
+String.prototype.toRGB = function() {
+    var hash = 0;
+    if (this.length === 0) return hash;
+    for (var i = 0; i < this.length; i++) {
+        hash = this.charCodeAt(i) + ((hash << 5) - hash);
+        hash = hash & hash;
+    }
+    var rgb = [0, 0, 0];
+    for (var i = 0; i < 3; i++) {
+        var value = (hash >> (i * 8)) & 255;
+        rgb[i] = value;
+    }
+    return(rgb);
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
@@ -327,6 +342,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         icon.onload = () => {
             ctx.drawImage(icon, x - iconSize / 2, y - iconSize / 2, iconSize, iconSize);
         };
+
+        NewEnts.forEach(rec => {
+            const ctx = canvas.getContext('2d');
+            ctx.beginPath(); // Draw a circle
+            ctx.arc(rec['cords'][0], rec['cords'][1], (rec['cords'][2] * myScaleVal), 0, Math.PI * 2); 
+            ctx.fillStyle = "rgba("+rec['eid'].toRGB().toString()+", 0.25)"; // Randomized color with 25% opacity
+            ctx.fill(); // Fill circle
+        });
+
     }
 
     // =================================================================
