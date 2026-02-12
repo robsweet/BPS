@@ -300,14 +300,16 @@ document.addEventListener('DOMContentLoaded', async () => {
                         cords: [
                             NewEnts[index].cords[0], // Keep existing x
                             NewEnts[index].cords[1], // Keep existing y
-                            state * floor.scale      // Update z
+                            parseFloat(state)     // I think this already comes to the UI scaled
+//                            state * floor.scale      // Update z
                         ]
                     });
                     
                 } else {
                     NewEnts.push({
                         eid: newEid, 
-                        cords: [rec.cords.x, rec.cords.y, state * floor.scale]
+                        cords: [rec.cords.x, rec.cords.y, parseFloat(state) ]  // I think this already comes to the UI scaled
+//                        cords: [rec.cords.x, rec.cords.y, state * floor.scale]
                     });
                 }
             } 
@@ -343,14 +345,23 @@ document.addEventListener('DOMContentLoaded', async () => {
             ctx.drawImage(icon, x - iconSize / 2, y - iconSize / 2, iconSize, iconSize);
         };
 
-        NewEnts.forEach(rec => {
-            const ctx = canvas.getContext('2d');
-            ctx.beginPath(); // Draw a circle
-            ctx.arc(rec['cords'][0], rec['cords'][1], (rec['cords'][2] * myScaleVal), 0, Math.PI * 2); 
-            ctx.fillStyle = "rgba("+rec['eid'].toRGB().toString()+", 0.25)"; // Randomized color with 25% opacity
-            ctx.fill(); // Fill circle
-        });
+        if (isChecked = document.getElementById("show_receiver_rings").checked) {
+            NewEnts.forEach(rec => {
+              if (rec['cords'][2] < 50) {
+                    const ctx = canvas.getContext('2d');
+                    ctx.beginPath(); // Draw a circle
+                    ctx.arc(rec['cords'][0], rec['cords'][1], (rec['cords'][2] * myScaleVal), 0, Math.PI * 2)
+                    ctx.fillStyle = "rgba("+rec['eid'].toRGB().toString()+", 0.25)"; // Randomized color with 25% opacity
+                    ctx.fill(); // Fill circle
 
+                    ctx.fillStyle = "black";
+                } else {
+                    ctx.fillStyle = "red";
+                }
+                ctx.font = "60px sans-serif";
+                ctx.fillText(rec['cords'][2].toFixed(2), rec['cords'][0], (rec['cords'][1] + 100));
+            });
+        }
     }
 
     // =================================================================
