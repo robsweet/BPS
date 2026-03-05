@@ -9,8 +9,6 @@ _LOGGER = logging.getLogger(__name__)
 # Definiera vilka inställningar användaren kan ange
 CONFIG_SCHEMA = vol.Schema(
     {
-        vol.Required("hass_token"): str,
-        vol.Required("hassURL"): str,
         vol.Optional("update_interval", default=1): int,
     }
 )

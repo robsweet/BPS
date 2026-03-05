@@ -1,170 +1,251 @@
-import aiofiles
-import aiofiles.os
+import aiofiles  # type: ignore
+import aiofiles.os  # pyright: ignore[reportMissingModuleSource]
 from pathlib import Path
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
-from homeassistant.components.frontend import async_register_built_in_panel, async_remove_panel
-from homeassistant.components.websocket_api import async_register_command, ActiveConnection, websocket_command
+from homeassistant.components.frontend import (
+    async_register_built_in_panel,
+    async_remove_panel,
+)
+from homeassistant.components import panel_custom
+from homeassistant.components.websocket_api import (
+    async_register_command,
+    ActiveConnection,
+    websocket_command,
+)
 from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.helpers import (
+    floor_registry as fr,
+    area_registry as ar,
+    device_registry as dr,
+    entity_registry as er,
+)
 from homeassistant.helpers.template import Template
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import entity_registry as er
+from homeassistant.const import Platform
+
 import numpy as np
 from scipy.optimize import least_squares
 import voluptuous as vol
 import logging
 import asyncio
 import os
+import re
 import json
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
 from shapely.geometry import Point, Polygon
-from asyncio import Lock, Queue, wait_for, TimeoutError
+from asyncio import Lock, Queue
+import traceback
 
 _LOGGER = logging.getLogger(__name__)
 
 DOMAIN = "bps"
 FRONTEND_PATH = Path(__file__).parent / "frontend"
 
+PLATFORMS = [Platform.SENSOR]
+
 # Global data
-global_data = []
 state_change_lock = Lock()
 state_change_counter = {}
 update_queue = Queue()
-tracked_listeners = {}
-tracked_entities = []
-new_global_data = {}
 secToUpdate = 1
-apitricords = []
 
-class FileWatcher(FileSystemEventHandler):
-    """A class to handle file changes"""
-    def __init__(self, file_path, callback, hass: HomeAssistant):
-        self.file_path = file_path
-        self.callback = callback
-        self.hass = hass  # Reference to the Home Assistant instance
 
-    def on_modified(self, event):
-        """Called when the file changes"""
-        if event.src_path == self.file_path:
-            asyncio.run_coroutine_threadsafe(self.callback(), self.hass.loop)
+class BPSMapData:
+    def __init__(self):
+        self.floors = {}
+        self.areas = {}
+        self.receivers = {}
 
-async def read_file(file_path):
-    """Read data asynchronously from the file"""
-    try:
-        async with aiofiles.open(file_path, mode="r") as file:
-            content = await file.read()
-        return content
-    except FileNotFoundError:
-        _LOGGER.warning("File not found: %s", file_path)
-        return ""
-    except Exception as e:
-        _LOGGER.error("Error reading file %s: %s", file_path, e)
-        return ""
+    def receivers_with_coords(self, floor_data):
+        return [
+            id
+            for id, receiver in floor_data.receivers.items()
+            if any(receiver["coords"])
+        ]
 
-def setup_file_watcher(file_path, update_callback, hass: HomeAssistant):
-    """Set up a file watcher to monitor changes"""
-    event_handler = FileWatcher(file_path, update_callback, hass)
-    observer = Observer()
-    observer.schedule(event_handler, os.path.dirname(file_path), recursive=False)
-    observer.start()
-    return observer
 
-async def update_global_data(file_path):
-    """Update global_data with the contents of the file"""
-    global global_data
-    new_data = await read_file(file_path) 
-    try:
-        global_data = json.loads(new_data) if new_data else []
+class BPSTriData:
+    def __init__(self):
+        self.tricoords = {}
+        self.cache = {}
 
-        _LOGGER.info("Updated global_data: %s", global_data)
-    except json.JSONDecodeError as e:
-        _LOGGER.error("Error parsing JSON data: %s", e)
 
-async def update_tracked_entities(hass, jinja_code):
-    """Update tracked_entities with the result of the Jinja code once per second."""
-    global tracked_entities, tracked_listeners, global_data, new_global_data
+async def cannot_trilaterate(message):
+    _LOGGER.info(message)
+    await asyncio.sleep(10)
+
+
+async def update_tracked_entities(hass, floor_data, runtime_data):
+    """Update tracked_entities with the result of trilateration once per second."""
+
+    ## TODO:
+    ## Add floor_id to floor_data.receivers objects
+
     global secToUpdate
-    while True:
+
+    jinja_code = """{{
+            expand(states.sensor)
+            | selectattr("entity_id", "search", "_distance_to_")
+            | map(attribute="entity_id")
+            | unique
+            | list
+    }}
+    """
+
+    new_tricoords = {}
+    while hass.data.get("bps_initialized", False):
+        if not any([floor.scale for floor in floor_data.floors.values()]):
+            await cannot_trilaterate(
+                "No floors have scale data.  Maps probably haven't been set up in the BPS UI."
+            )
+            continue  # start over
+
+        if len(floor_data.receivers_with_coords(floor_data)) < 3:
+            await cannot_trilaterate(
+                f"Only {len(floor_data.receivers_with_coords(floor_data))} receivers have coords.  Place at least 3 receivers in the BPS UI."
+            )
+            continue  # start over
+
         try:
             template = Template(jinja_code, hass)
-            tracked_entities = template.async_render()
-
-            num_points = len(tracked_entities)
-            if num_points < 3: # There are no devices close enough to track, wait 10 seconds until try again
-                _LOGGER.info("There are no devices present to track, sleep 10 seconds")
-                await asyncio.sleep(10)
-                continue  # Skip and start over
-            
-            cleaned = [item.split("_distance_to_")[0].replace("sensor.", "") for item in tracked_entities]
-            unique_values = list(set(cleaned))
-            new_global_data = [{"entity": ent, "data": global_data} for ent in unique_values]
-            
-            await process_entities(hass, new_global_data)
-
+            bermuda_entities = template.async_render()
         except Exception as e:
-            _LOGGER.info(f"Error executing Jinja code: {e}")
+            _LOGGER.info(
+                f"Error executing Jinja code: {e} {''.join(traceback.format_exception(e))}"
+            )
 
-        await asyncio.sleep(secToUpdate)  # Run every X seconds, set timer in global variables
+        new_tricoords = {}
 
-async def update_receiver_radii(hass, eids):
-    """Update receiver 'r' values for an entity"""
-    for floor in (f for f in eids["data"]["floor"] if f["scale"] is not None):
-        for receiver in floor["receivers"]:
-            entity_id = "sensor." + eids["entity"] + "_distance_to_" + receiver["entity_id"]
-            rec_value = hass.states.get(entity_id)
-            if rec_value is not None:
-                try:
-                    radius = floor["scale"] * float(rec_value.state)
-                    receiver["cords"]["r"] = radius
-                except ValueError:
-                    #_LOGGER.info(f"Invalid numerical value: {rec_value.state}")
-                    pass
-            else:
-                #_LOGGER.info(f"Entity had no value: {receiver['entity_id']}")
-                pass
+        receiver_state_tasks = []
+        for tracker_id, receiver_id in [
+            item.replace("sensor.", "").split("_distance_to_")
+            for item in bermuda_entities
+        ]:
+            if not floor_data.receivers[receiver_id]["coords"]:
+                _LOGGER.debug(
+                    f"Receiver {receiver_id} has not been placed using the BPS UI."
+                )
+                continue
 
-async def update_trilateration_and_zone(hass, new_global_data, entity):
+            if not floor_data.floors[floor_data.receivers[receiver_id]["floor"]][
+                "scale"
+            ]:
+                _LOGGER.debug(
+                    f"Scale not set for floor '{floor_data.receivers[receiver_id]['floor']}'. Skipping receiver {receiver_id}."
+                )
+                continue
+
+            new_tricoords[tracker_id].setdefault({})
+            receiver_state_tasks.append(
+                asyncio.create_task(
+                    update_receiver_state(
+                        hass, floor_data, new_tricoords, tracker_id, receiver_id
+                    )
+                )
+            )
+
+        await asyncio.gather(receiver_state_tasks)
+
+        tracker_state_tasks = [
+            asyncio.create_task(
+                update_trilateration_and_area(
+                    hass, floor_data, runtime_data, new_tricoords, tracker_id
+                )
+            )
+            for tracker_id in new_tricoords.keys()
+        ]
+
+        await asyncio.gather(tracker_state_tasks)
+        ## await asyncio.gather(*state_tasks)  # Run all entities in parallel, but maintain the correct internal order
+        ## Why the *?
+        await asyncio.sleep(
+            secToUpdate
+        )  # Run every X seconds, set timer in global variables
+        runtime_data.tricoords = new_tricoords
+
+
+async def update_receiver_state(
+    hass, floor_data, new_tricoords, tracker_id, receiver_id
+):
+    entity_id = f"{tracker_id}_distance_to_{receiver_id}"
+    new_tricoords[tracker_id][receiver_id] = {
+        "state": hass.states.get(entity_id),
+        "radius": None,
+        "coords": floor_data.receivers[receiver_id]["coords"],
+    }
+
+    if new_tricoords[tracker_id][receiver_id]["state"] is not None:
+        try:
+            scale = floor_data.floors[floor_data.receivers[receiver_id]["floor"]][
+                "scale"
+            ]
+            state = float(new_tricoords[tracker_id][receiver_id]["state"])
+            new_tricoords[tracker_id][receiver_id]["radius"] = scale * state
+        except ValueError:
+            _LOGGER.debug(
+                f"Invalid numerical value: {new_tricoords[tracker_id][receiver_id]['state']}"
+            )
+    else:
+        _LOGGER.debug(f"Entity had no value: {receiver_id}")
+
+
+async def update_trilateration_and_area(
+    hass, floor_data, runtime_data, new_tricoords, tracker_id
+):
     """Trilateration with r-value filtering and moving average filtering."""
-    global apitricords
     filter_percent = 0.5  # 50% change in r-value
     filter_value_high = 1 * (1 + filter_percent)
     filter_value_low = 1 * (1 - filter_percent)
 
     # Store last r-values per sensor and entity
-    if not hasattr(update_trilateration_and_zone, "last_r_values"):
-        update_trilateration_and_zone.last_r_values = {}
+    runtime_data.cache.setdefault("last_r_values", {})
     # Store last positions for moving average filtering
-    if not hasattr(update_trilateration_and_zone, "position_history"):
-        update_trilateration_and_zone.position_history = {}
+    runtime_data.cache.setdefault("position_history", {})
 
-    lowest_floor_name, filtered_cords = extract_floor_and_receivers(new_global_data, entity)
-    # filtered_cords: list of (x, y, r)
+    closest_floor_id = find_closest_floor_id(floor_data, new_tricoords[tracker_id])
+    closest_floor_name = floor_data[closest_floor_id]["name"]
+
+    receiver_ids_on_floor = [
+        receiver_id
+        for receiver_id, rec in new_tricoords[tracker_id].receivers.items()
+        if rec["floor_id"] == closest_floor_id
+    ]
+    # receivers_on_floor: list of the receivers on the closest floor to the tracker
 
     # Get previous r-values for this entity
-    last_r = update_trilateration_and_zone.last_r_values.get(entity, {})
+    last_r = runtime_data.cache["last_r_values"].getdefault(tracker_id, {})
 
     # Filter out points where r has changed too much
     filtered = []
-    for idx, (x, y, r) in enumerate(filtered_cords):
-        key = (x, y)  # or receiver-id if available
-        prev_r = last_r.get(key)
+    for receiver_id in receiver_ids_on_floor:
+        r = new_tricoords[tracker_id]["receivers"][receiver_id]["radius"]
+        prev_r = last_r.get(receiver_id)
         if prev_r is not None:
-            if r > prev_r * filter_value_high or r < prev_r * filter_value_low:  # e.g. max 100% change
+            if (
+                r > prev_r * filter_value_high or r < prev_r * filter_value_low
+            ):  # e.g. max 100% change
                 continue  # skip this point
-        filtered.append((x, y, r))
+        filtered.append(receiver_id)
+    receiver_ids_on_floor = filtered
 
     # Store current r-values for next time
-    update_trilateration_and_zone.last_r_values[entity] = {(x, y): r for (x, y, r) in filtered_cords}
+    runtime_data.cache["last_r_values"][tracker_id] = {
+        (rec["receiver_id"]): rec["radius"] for rec in receiver_ids_on_floor
+    }
 
-    if len(filtered) < 3:
+    if len(receiver_ids_on_floor) < 3:
         # Too few points left for trilateration
         return
 
-    tricords = trilaterate(filtered)
+    tricords = trilaterate(
+        [
+            (rec["coords"]["x"], rec["coords"]["y"], rec["radius"])
+            for rec in new_tricoords[tracker_id][receiver_id]
+        ]
+    )
     if tricords is not None:
         # Moving average filtering
-        history = update_trilateration_and_zone.position_history.setdefault(entity, [])
+        history = runtime_data.cache["position_history"].setdefault(tracker_id, [])
         history.append(tricords)
         if len(history) > 3:  # Keep only the last 3 positions
             history.pop(0)
@@ -172,210 +253,285 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
         avg_y = sum(pos[1] for pos in history) / len(history)
 
         test_point = Point(float(avg_x), float(avg_y))
-        zone = find_zone_for_point(new_global_data, entity, lowest_floor_name, test_point)
-        apitricords = update_or_add_entry(apitricords, {"ent": entity, "cords": [avg_x, avg_y], "zone": zone})
-        await update_apitricords(hass, apitricords)
-        hass.states.async_set(f"sensor.{entity}_bps_zone", zone)
-        hass.states.async_set(f"sensor.{entity}_bps_floor", lowest_floor_name)
+        area = find_area_for_point(floor_data.floors[closest_floor_id], test_point)
+        new_tricoords[tracker_id].merge({"cords": [avg_x, avg_y], "area": area})
 
-def update_or_add_entry(data, new_entry):
-    for item in data:
-        if item["ent"] == new_entry["ent"]:  # Check if "ent" already exists
-            item["cords"] = new_entry["cords"]  # Update "cords"
-            item["zone"] = new_entry["zone"]  # Update "zone"
-            return data
+        hass.states.async_set(f"sensor.{tracker_id}_bps_area", area)
+        hass.states.async_set(f"sensor.{tracker_id}_bps_floor", closest_floor_name)
 
-    # If "ent" was not found, add as new post
-    data.append(new_entry)
-    return data
 
-async def update_apitricords(hass, new_data):
-    """Update apitricords in hass.data"""
-    hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN]["apitricords"] = new_data
+def find_closest_floor_id(floor_data, receivers):
+    """Find closest floor and filter receiver cords."""
+    return min([rec["radius"] for rec in receivers if rec["radius"]])["floor_id"]
 
-async def process_single_entity(hass, new_global_data, eids):
-    """Process a single entity: first receivers, then trilateration"""
-    await update_receiver_radii(hass, eids)  # Wait for the receivers to update
-    await update_trilateration_and_zone(hass, new_global_data, eids["entity"])  # When it is complete → perform trilateration
 
-async def process_entities(hass, new_global_data):
-    """Process multiple entities in parallel, but ensure the correct order for each individual entity"""
-    tasks = [process_single_entity(hass, new_global_data, eids) for eids in new_global_data]
-    await asyncio.gather(*tasks)  # Run all entities in parallel, but maintain the correct internal order
-
-def extract_floor_and_receivers(new_global_data, tmpentity):
-    """Find lowest floor and filter receiver cords."""
-    lowest_floor_name, lowest_r = None, float("inf")
-    filtered_cords = []
-
-    for entity in new_global_data:
-        if entity["entity"] == tmpentity:
-            for floor in entity["data"]["floor"]:
-                for receiver in floor["receivers"]:
-                    if "cords" in receiver and "r" in receiver["cords"]:
-                        r_value = receiver["cords"]["r"]
-                        if r_value < lowest_r:
-                            lowest_r, lowest_floor_name = r_value, floor["name"]
-                        if floor["name"] == lowest_floor_name:
-                            filtered_cords.append(tuple(receiver["cords"].values()))
-    return lowest_floor_name, filtered_cords
-
-def find_zone_for_point(data, entity, floor_name, point):
-    """Find zone for point, prioritize correct polygon, select nearest buffer if no correct zone matches."""
+def find_area_for_point(data, entity, floor_data, point):
+    """Find area for point, prioritize correct polygon, select nearest buffer if no correct area matches."""
     buffer_percent = 0.05  # set to 5%
     buffer_candidates = []
-    for entity_data in data:
-        if entity_data["entity"] == entity:
-            for floor in entity_data["data"]["floor"]:
-                if floor["name"] == floor_name:
-                    for zone in floor["zones"]:
-                        polygon = Polygon([(coord["x"], coord["y"]) for coord in zone["cords"]])
-                        xs = [coord["x"] for coord in zone["cords"]]
-                        ys = [coord["y"] for coord in zone["cords"]]
-                        width = max(xs) - min(xs)
-                        height = max(ys) - min(ys)
-                        buffer_size = ((width + height) / 2) * buffer_percent
-                        if polygon.contains(point):
-                            return zone["entity_id"]  # Prioritize correct polygon
-                        elif polygon.buffer(buffer_size).contains(point):
-                            # Save candidate: (distance to edge, entity_id)
-                            distance_to_edge = polygon.exterior.distance(point)
-                            buffer_candidates.append((distance_to_edge, zone["entity_id"]))
+
+    for area in floor_data["areas"]:
+        polygon = Polygon([(coord["x"], coord["y"]) for coord in area["cords"]])
+        xs = [coord["x"] for coord in area["cords"]]
+        ys = [coord["y"] for coord in area["cords"]]
+        width = max(xs) - min(xs)
+        height = max(ys) - min(ys)
+        buffer_size = ((width + height) / 2) * buffer_percent
+        if polygon.contains(point):
+            return area["entity_id"]  # Prioritize correct polygon
+        elif polygon.buffer(buffer_size).contains(point):
+            # Save candidate: (distance to edge, entity_id)
+            distance_to_edge = polygon.exterior.distance(point)
+            buffer_candidates.append((distance_to_edge, area["entity_id"]))
+
     if buffer_candidates:
-        # Select zone whose edge is closest to the point
+        # Select area whose edge is closest to the point
         buffer_candidates.sort()
         return buffer_candidates[0][1]
     return "unknown"
 
-async def async_setup(hass, config):
-    """Set up the BPS integration."""
-    _LOGGER.info("BPS integration initierad.")
 
+async def _ensure_panel_registered(hass: HomeAssistant) -> bool:
+    """Ensure the panel is registered, used for retry scenarios."""
+    _LOGGER.debug("\tBPS: Ensuring panel registration")
+
+    # Check if www directory exists
+    www_path = hass.config.path("custom_components/bps/frontend")
+    try:
+        js_file = os.path.join(www_path, "rob_test_panel.js")
+        if not os.path.exists(js_file):
+            _LOGGER.error("\t\tBPS: Frontend JS file missing at %s", js_file)
+            return False
+
+        _LOGGER.info("\t\tBPS: Frontend files verified at %s", www_path)
+    except Exception as e:
+        _LOGGER.error("\t\tBPS: Error checking frontend files: %s", e)
+        return False
+
+    try:
+        # Register static paths if not already registered
+        await hass.http.async_register_static_paths(
+            [StaticPathConfig("/bps/", www_path, False)]
+        )
+        _LOGGER.debug("\t\tBPS: Static paths registered successfully")
+    except Exception as e:
+        # Static paths might already be registered, this is not critical
+        _LOGGER.debug(
+            "\t\tBPS: Static paths registration skipped or failed (likely already registered): %s",
+            e,
+        )
+
+    # Register the panel with defensive error handling
+    try:
+        await panel_custom.async_register_panel(
+            hass,
+            frontend_url_path="bps",
+            webcomponent_name="rob-test-panel",
+            sidebar_title="BPS",
+            sidebar_icon="mdi:graph",
+            js_url="/bps/rob-test-panel.js",
+            # module_url="/bps/rob-test-panel.js",
+            config={},
+            require_admin=False,
+        )
+        _LOGGER.info(
+            "\t\tBPS: ✅ Panel registered successfully - look for 'BPS' in your sidebar!"
+        )
+        return True
+    except ValueError as e:
+        if "Overwriting panel" in str(e):
+            _LOGGER.debug("\t\tBPS: Panel already registered, skipping registration")
+            return True
+        else:
+            _LOGGER.error("\t\tBPS: ❌ Failed to register panel (ValueError): %s", e)
+            return False
+    except Exception as e:
+        _LOGGER.error(
+            "\t\tBPS: ❌ Unexpected error during panel registration: %s",
+            e,
+            exc_info=True,
+        )
+        return False
+
+
+async def do_async_setup(hass, config):
+    """Set up the BPS integration."""
     if hass.data.get("bps_initialized", False):
-        _LOGGER.warning("BPS has already been initialized. Aborting")
+        _LOGGER.warning("BPS has already started initializing. Aborting")
         return True  # Abort if already running
 
-    hass.data["bps_initialized"] = True  # Set flag
+    def wait_until_hass_has_states(hass):
+        _LOGGER.debug("\tWaiting for hass.states to exist...")
+        while not hass.states:
+            _LOGGER.debug("\t\tStill waiting...")
+            sleep(3)
+
+    def generate_new_data(hass):
+        floor_reg = fr.async_get(hass)
+        area_reg = ar.async_get(hass)
+        ent_reg = er.async_get(hass)
+        dev_reg = dr.async_get(hass)
+
+        fresh_data = BPSMapData()
+
+        if not floor_reg.async_list_floors():
+            _LOGGER.info("CANNOT START! No floors have been set up in HA!")
+            return None
+
+        for floor in floor_reg.async_list_floors():
+            fresh_data.floors[floor.floor_id] = {
+                "name": floor.name,
+                "floor_id": floor.floor_id,
+                "icon": floor.icon,
+                "scale": None,
+                "receivers": [],
+                "areas": [],
+            }
+
+            areas = area_reg.async_list_areas()
+            for area in areas:
+                if area.floor_id != floor.floor_id:
+                    continue
+
+                my_area = {
+                    "name": area.name,
+                    "entity_id": area.id,
+                    "icon": area.icon,
+                    "type": "area",
+                    "cords": [],
+                }
+                fresh_data.areas[area.id] = my_area
+                fresh_data.floors[floor.floor_id]["areas"].append(my_area)
+
+        receiver_ids = {
+            re.sub(".*_distance_to_", "", key)
+            for key in hass.data["entity_info"]
+            if "_distance_to_" in key
+        }
+        for receiver_id in receiver_ids:
+            my_rec = {
+                "receiver_id": receiver_id,
+                "type": "receiver",
+                "floor_id": None,
+                "cords": {},
+            }
+            fresh_data.receivers.append(my_rec)
+
+        return fresh_data
+
+    async def start_data_processing_when_ready(hass, runtime_data):
+        wait_until_hass_has_states(hass)
+
+        if not hass.data[DOMAIN].floors:
+            hass.data[DOMAIN] = generate_new_data(hass)
+
+        hass.async_create_task(
+            update_tracked_entities(hass, hass.data[DOMAIN], runtime_data)
+        )
+
+        _LOGGER.info("The BPS integration is fully initialized")
 
     async def initialize_bps():
         """Initialize the BPS component"""
         _LOGGER.info("Initializing BPS...")
 
-        if "bps_views_registered" not in hass.data:
-            hass.http.register_view(BPSFrontendView())
-            hass.http.register_view(BPSSaveAPIText())
-            hass.http.register_view(BPSMapsListAPI())
-            hass.http.register_view(BPSReadAPIText())
-            hass.http.register_view(BPSCordsAPI(hass))
-            hass.data["bps_views_registered"] = True
+        hass.data.setdefault(DOMAIN, BPSMapData())
+        hass.data["bps_initialized"] = True  # Set flag
 
-        if "bps_websocket" not in hass.data:
-            websocket = BPSEntityWebSocket(hass)
-            websocket.register()
-            hass.data["bps_websocket"] = websocket
-
-        config_path = hass.config.path()
-        target_dir = os.path.join(config_path, "www", "bps_maps")
-        target_file = os.path.join(target_dir, "bpsdata.txt")
-
+        target_dir = os.path.join(hass.config.path(), "www", "bps_maps")
         try:
             await aiofiles.os.makedirs(target_dir, exist_ok=True)
-            _LOGGER.info(f"Folder {target_dir} has been created or already existed")
+            _LOGGER.info(f"\tFolder {target_dir} has been created or already existed")
         except Exception as e:
-            _LOGGER.error(f"Could not create the folder {target_dir}: {e}")
+            _LOGGER.error(f"\tCould not create the folder {target_dir}: {e}")
             return
 
-        panels = hass.data.get("frontend_panels", {})
-        if "bps" in panels:
-            async_remove_panel(hass, "bps")
-        try:
-            _LOGGER.debug("Registering the built-in panel for BPS...")
-            async_register_built_in_panel(
-                hass=hass,
-                component_name="iframe",
-                sidebar_title="BPS",
-                sidebar_icon="mdi:map",
-                frontend_url_path="bps",
-                config={"url": "/bps/index.html"},
-            )
-            _LOGGER.info("Panel registered successfully.")
-        except Exception as e:
-            _LOGGER.error(f"Failed to register panel: {e}")
+        hass.async_create_task(
+            start_data_processing_when_ready(hass, config.runtime_data)
+        )
 
-        try:
-            if not os.path.exists(target_file):
-                async with aiofiles.open(target_file, mode="w") as file:
-                    await file.write("")  # Skapa en tom fil
-                _LOGGER.info(f"File {target_file} has been created.")
-            else:
-                _LOGGER.info(f"File {target_file} already exist.")
-        except Exception as e:
-            _LOGGER.error(f"Could not create file {target_file}: {e}")
+        # if "bps_websocket" not in hass.data:
+        #     websocket = BPSEntityWebSocket(hass)
+        #     websocket.register()
+        #     hass.data["bps_websocket"] = websocket
 
-        await update_global_data(target_file)
-
-        observer = setup_file_watcher(target_file, lambda: update_global_data(target_file), hass)
-
-        jinja_code = """
-        {{
-            expand(states.sensor)
-            | selectattr("entity_id", "search", "_distance_to_")
-            | selectattr("state", "is_number")
-            | map(attribute="entity_id")
-            | unique
-            | list
-        }}
-        """
-
-        hass.async_create_task(update_tracked_entities(hass, jinja_code))
-
-        hass.bus.async_listen_once("homeassistant_stop", lambda event: observer.stop())
-
-        _LOGGER.info("The BPS integration is fully initialized")
+        # panels = hass.data.get("frontend_panels", {})
+        # if "bps" in panels:
+        #     async_remove_panel(hass, "bps")
+        # try:
+        #     _LOGGER.debug("\tRegistering the built-in panel for BPS...")
+        #     async_register_built_in_panel(
+        #         hass=hass,
+        #         component_name="iframe",
+        #         sidebar_title="BPS",
+        #         sidebar_icon="mdi:map",
+        #         frontend_url_path="bps",
+        #         config={"url": "/bps/index.html"},
+        #     )
+        #     _LOGGER.info("\t\tPanel registered successfully.")
+        # except Exception as e:
+        #     _LOGGER.error(f"\t\tFailed to register panel: {e}")
 
     async def handle_homeassistant_started(event):
-        """Handles the 'homeassistant_started' event"""
         await initialize_bps()
+
+    async def remove_sensors(hass, config):
+        _LOGGER.info(f"Removing sensors for integration unload")
+        entity_registry = er.async_get(hass)
+
+        # Find and remove all entities that belong to "bps"
+        entities_to_remove = [
+            entity.entity_id
+            for entity in entity_registry.entities.values()
+            if entity.platform == "bps"
+        ]
+
+        for entity_id in entities_to_remove:
+            _LOGGER.info(f"\tRemoving sensor: {entity_id}")
+            entity_registry.async_remove(entity_id)
+        _LOGGER.info(f"Done removing sensors")
+
+    async def handle_homeassistant_stop(event):
+        hass.data["bps_initialized"] = False
+        await remove_sensors(hass, config)
 
     if hass.is_running:
         await initialize_bps()
     else:
-        hass.bus.async_listen_once("homeassistant_started", handle_homeassistant_started)
+        hass.bus.async_listen_once(
+            "homeassistant_started", handle_homeassistant_started
+        )
+
+    hass.bus.async_listen_once("homeassistant_stop", handle_homeassistant_stop)
 
     return True
 
+
 async def async_unload_entry(hass: HomeAssistant, entry):
     """Remove a configuration entry"""
-    _LOGGER.info("Attempting to offload platforms for entry: %s", entry.entry_id)
+    _LOGGER.info("Attempting to unload platforms for entry: %s", entry.entry_id)
 
-    entity_registry = er.async_get(hass)
+    hass.data["bps_initialized"] = False
 
-    # Find and remove all entities that belong to "bps"
-    entities_to_remove = [
-        entity.entity_id for entity in entity_registry.entities.values()
-        if entity.platform == "bps"
-    ]
-
-    for entity_id in entities_to_remove:
-        _LOGGER.info(f"Removes sensor: {entity_id}")
-        entity_registry.async_remove(entity_id)
-
-    try: # Attempt to unload platforms
-        unload_ok = await hass.config_entries.async_unload_platforms(entry, ["sensor"])
+    try:  # Attempt to unload platforms
+        unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     except Exception as e:
-        _LOGGER.error(f"Error during offloading of platforms for entry {entry.entry_id}: {e}")
+        _LOGGER.error(
+            f"\tError during unloading of platforms for entry {entry.entry_id}: {e}"
+        )
         return False
 
     if not unload_ok:
-        _LOGGER.error("Failed to offload platforms for entry: %s", entry.entry_id)
+        _LOGGER.error("\tFailed to unload platforms for entry: %s", entry.entry_id)
         return False
 
-    try: #Remove the frontend panel
+    try:  # Remove the frontend panel
         async_remove_panel(hass, frontend_url_path="bps")
-        _LOGGER.info("Frontend-panel removed for entry: %s", entry.entry_id)
+        _LOGGER.info("\tFrontend-panel removed for entry: %s", entry.entry_id)
     except Exception as e:
-        _LOGGER.error(f"Error when removing frontend-panel for entry {entry.entry_id}: {e}")
+        _LOGGER.error(
+            f"\tError when removing frontend-panel for entry {entry.entry_id}: {e}"
+        )
         return False
 
     return True
@@ -383,11 +539,14 @@ async def async_unload_entry(hass: HomeAssistant, entry):
 
 async def async_setup_entry(hass, entry):
     """Set the integration from a configuration entry"""
-    _LOGGER.info("async_setup_entry har anropats")
-    await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
+    _LOGGER.info("\tStarting integration setup")
+    entry.runtime_data = BPSTriData()
+
+    returns = await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     """Set up BPS from a config entry."""
-    return await async_setup(hass, entry)
+    return await do_async_setup(hass, entry)
+
 
 class BPSFrontendView(HomeAssistantView):
     """Serve the frontend files."""
@@ -395,7 +554,7 @@ class BPSFrontendView(HomeAssistantView):
     url = "/bps/{file_name}"
     name = "bps:frontend"
     requires_auth = False
-    #requires_auth = True
+    # requires_auth = True
 
     async def get(self, request, file_name):
         """Serve static files from the frontend folder."""
@@ -408,6 +567,7 @@ class BPSFrontendView(HomeAssistantView):
             return web.Response(status=404, text="File not found")
 
         return web.FileResponse(path=str(frontend_path))
+
 
 class BPSSaveAPIText(HomeAssistantView):
     """Handle saving of BPS coordinates to a text file."""
@@ -422,19 +582,20 @@ class BPSSaveAPIText(HomeAssistantView):
         data = await request.post()
 
         coordinates = data.get("coordinates")
-        
+
         if not coordinates:
             return web.Response(status=400, text="Missing coordinates")
-        
+
         # Define the path to the bpsdata file
         maps_path = hass.config.path("www/bps_maps")
         bpsdata_file_path = Path(maps_path) / "bpsdata.txt"
-        
-        try: # Save coordinates to the bpsdata file
+
+        try:  # Save coordinates to the bpsdata file
             async with aiofiles.open(bpsdata_file_path, "w") as f:
                 await f.write(coordinates)
-                _LOGGER.warning(f"New file: {data.get("new_floor")}")
-                if data.get("new_floor") == "true": # If it is a new floor then save the file
+                if (
+                    data.get("new_floor") == "true"
+                ):  # If it is a new floor then save the file
                     map_file = data.get("file")
                     if not map_file:
                         return web.Response(status=400, text="Missing file")
@@ -445,7 +606,7 @@ class BPSSaveAPIText(HomeAssistantView):
                     except Exception as e:
                         _LOGGER.error(f"Failed to save maps: {e}")
                         return web.Response(status=500, text="Failed to save maps")
-                    
+
                 # Check if "remove" key exists and delete the specified file
                 remove_file = data.get("remove")
                 if remove_file:
@@ -456,16 +617,21 @@ class BPSSaveAPIText(HomeAssistantView):
                             remove_file_path.unlink()  # Delete the file
                             _LOGGER.info(f"Removed file: {remove_file_path}")
                         except Exception as e:
-                            _LOGGER.error(f"Failed to remove file {remove_file_path}: {e}")
-                            return web.Response(status=500, text="Failed to remove file")
-               
+                            _LOGGER.error(
+                                f"Failed to remove file {remove_file_path}: {e}"
+                            )
+                            return web.Response(
+                                status=500, text="Failed to remove file"
+                            )
+
             _LOGGER.info(f"Saved coordinates to bpsdata: {coordinates}")
             return web.Response(status=200, text="Coordinates saved successfully")
-        
+
         except Exception as e:
             _LOGGER.error(f"Failed to save coordinates: {e}")
             return web.Response(status=500, text="Failed to save coordinates")
-        
+
+
 class BPSReadAPIText(HomeAssistantView):
     """Handle reading of BPS coordinates from a text file."""
 
@@ -476,45 +642,48 @@ class BPSReadAPIText(HomeAssistantView):
     async def get(self, request):
         """Handle reading coordinates from the text file."""
         hass = request.app["hass"]
-        maps_path = hass.config.path("www/bps_maps") # Define the path to the bpsdata file
+        maps_path = hass.config.path(
+            "www/bps_maps"
+        )  # Define the path to the bpsdata file
         bpsdata_file_path = Path(maps_path) / "bpsdata.txt"
         entityjinja = """
         {{
-            expand(states.sensor) 
+            expand(states.sensor)
             | selectattr("entity_id", "search", "_distance_to_")
             | map(attribute="entity_id")
-            | map("replace", "sensor.", "")  
-            | map("regex_replace", "_distance_to_.*", "")  
+            | map("replace", "sensor.", "")
+            | map("regex_replace", "_distance_to_.*", "")
             | unique
             | list
         }}
         """
 
         try:
-            template = Template(entityjinja, hass) # Render Jinja code
+            template = Template(entityjinja, hass)  # Render Jinja code
             entities = template.async_render()
         except Exception as e:
             _LOGGER.info(f"Error during the execution of the Jinja code: {e}")
 
         try:
-            if not bpsdata_file_path.is_file(): # Check if the file exists
+            if not bpsdata_file_path.is_file():  # Check if the file exists
                 return web.Response(status=404, text="bpsdata.txt not found")
 
-            async with aiofiles.open(bpsdata_file_path, "r") as f: # Read the content of the file
+            async with aiofiles.open(
+                bpsdata_file_path, "r"
+            ) as f:  # Read the content of the file
                 content = await f.read()
 
             _LOGGER.info(f"Read coordinates from bpsdata: {content}")
-            return web.json_response({
-                "coordinates": content,
-                "entities": entities
-            })
-        
+            return web.json_response({"coordinates": content, "entities": entities})
+
         except Exception as e:
             _LOGGER.error(f"Failed to read coordinates: {e}")
             return web.Response(status=500, text="Failed to read coordinates")
 
+
 class BPSMapsListAPI(HomeAssistantView):
     """API to list map files in /www/bps_maps."""
+
     url = "/api/bps/maps"
     name = "api:bps:maps"
     requires_auth = False
@@ -526,15 +695,17 @@ class BPSMapsListAPI(HomeAssistantView):
 
         try:
             files = [
-                f for f in os.scandir(maps_path) 
-                if f.is_file() and f.name.lower().endswith(('.png', '.jpg'))
+                f
+                for f in os.scandir(maps_path)
+                if f.is_file() and f.name.lower().endswith((".png", ".jpg"))
             ]
             file_names = [f.name for f in files]
             return web.json_response(file_names)
         except Exception as e:
             _LOGGER.error(f"Error listing map files: {e}")
             return web.Response(status=500, text="Error listing map files")
-        
+
+
 class BPSCordsAPI(HomeAssistantView):
     """API för att skicka tillbaka apitricords"""
 
@@ -548,12 +719,12 @@ class BPSCordsAPI(HomeAssistantView):
 
     async def get(self, request):
         """Returnera apitricords från hass.data"""
-        apitricords = self.hass.data.get(DOMAIN, {}).get("apitricords", {})
-
+        apitricords = self.hass.runtime_data.get(DOMAIN, None)
         if not apitricords:
             return web.json_response({"error": "No data available"}, status=404)
 
         return web.json_response(apitricords)
+
 
 class BPSEntityWebSocket:
     def __init__(self, hass):
@@ -566,39 +737,49 @@ class BPSEntityWebSocket:
         _LOGGER.debug(f"Received subscription request: {msg}")
         entity_ids = msg["entities"]
         if not entity_ids:
-            connection.send_message({
-                "id": msg["id"],
-                "type": "result",
-                "success": False,
-                "error": {"code": "invalid_request", "message": "No entities provided."},
-            })
+            connection.send_message(
+                {
+                    "id": msg["id"],
+                    "type": "result",
+                    "success": False,
+                    "error": {
+                        "code": "invalid_request",
+                        "message": "No entities provided.",
+                    },
+                }
+            )
             return
 
-        self.connections.append(connection) # Add a connection to subscribed entities
+        self.connections.append(connection)  # Add a connection to subscribed entities
         for entity_id in entity_ids:
             if entity_id not in self.tracked_entities:
                 self.tracked_entities[entity_id] = []
             self.tracked_entities[entity_id].append(connection)
 
-        current_states = [] # Send the current state for all subscribed entities
+        current_states = []  # Send the current state for all subscribed entities
         for entity_id in entity_ids:
             state = hass.states.get(entity_id)
             if state:
-                current_states.append({
-                    "entity_id": entity_id,
-                    "state": state.state,
-                    "attributes": state.attributes,
-                })
+                current_states.append(
+                    {
+                        "entity_id": entity_id,
+                        "state": state.state,
+                        "attributes": state.attributes,
+                    }
+                )
 
-        connection.send_message({
-            "id": msg["id"],
-            "type": "result",
-            "success": True,
-            "message": f"Subscribed to entities: {entity_ids}",
-            "current_states": current_states,  
-        })
-        async_track_state_change_event(hass, entity_ids, self.state_change_listener) # Listen for state_change
-
+        connection.send_message(
+            {
+                "id": msg["id"],
+                "type": "result",
+                "success": True,
+                "message": f"Subscribed to entities: {entity_ids}",
+                "current_states": current_states,
+            }
+        )
+        async_track_state_change_event(
+            hass, entity_ids, self.state_change_listener
+        )  # Listen for state_change
 
     async def handle_unsubscribe(self, hass, connection: ActiveConnection, msg: dict):
         """Managing unsubscription"""
@@ -611,54 +792,67 @@ class BPSEntityWebSocket:
                 if not self.tracked_entities[entity_id]:
                     del self.tracked_entities[entity_id]
 
-        connection.send_message({
-            "id": msg["id"],
-            "type": "result",
-            "success": True,
-            "message": f"Unsubscribed from entities: {entity_ids}",
-        })
+        connection.send_message(
+            {
+                "id": msg["id"],
+                "type": "result",
+                "success": True,
+                "message": f"Unsubscribed from entities: {entity_ids}",
+            }
+        )
 
     async def handle_known_points(self, hass, connection: ActiveConnection, msg: dict):
         try:
-            known_points = msg.get("knownPoints") # Read knownPoints from the message
+            known_points = msg.get("knownPoints")  # Read knownPoints from the message
             if not known_points:
-                connection.send_message({
-                    "id": msg["id"],
-                    "type": "tri_result",
-                    "success": False,
-                    "error": {"code": "invalid_request", "message": "No knownPoints provided."}
-                })
+                connection.send_message(
+                    {
+                        "id": msg["id"],
+                        "type": "tri_result",
+                        "success": False,
+                        "error": {
+                            "code": "invalid_request",
+                            "message": "No knownPoints provided.",
+                        },
+                    }
+                )
                 return
 
-            result = trilaterate(known_points) # Perform trilateration
+            result = trilaterate(known_points)  # Perform trilateration
 
-            if result is None: # If the result is None, return an error
-                connection.send_message({
-                    "id": msg["id"],
-                    "type": "tri_result",
-                    "success": False,
-                    "error": {"code": "calculation_error", "message": "Trilateration failed."}
-                })
+            if result is None:  # If the result is None, return an error
+                connection.send_message(
+                    {
+                        "id": msg["id"],
+                        "type": "tri_result",
+                        "success": False,
+                        "error": {
+                            "code": "calculation_error",
+                            "message": "Trilateration failed.",
+                        },
+                    }
+                )
                 return
 
-            connection.send_message({ # Send back the result
-                "id": msg["id"],
-                "type": "tri_result",
-                "success": True,
-                "result": {
-                    "x": result[0],
-                    "y": result[1]
+            connection.send_message(
+                {  # Send back the result
+                    "id": msg["id"],
+                    "type": "tri_result",
+                    "success": True,
+                    "result": {"x": result[0], "y": result[1]},
                 }
-            })
+            )
 
         except Exception as e:
             _LOGGER.error(f"Error processing knownPoints: {e}")
-            connection.send_message({
-                "id": msg["id"],
-                "type": "tri_result",
-                "success": False,
-                "error": {"code": "server_error", "message": str(e)}
-            })
+            connection.send_message(
+                {
+                    "id": msg["id"],
+                    "type": "tri_result",
+                    "success": False,
+                    "error": {"code": "server_error", "message": str(e)},
+                }
+            )
 
     async def state_change_listener(self, event):
         """Listens for status changes and sends them to connections."""
@@ -680,17 +874,18 @@ class BPSEntityWebSocket:
         for connection in self.tracked_entities.get(entity_id, []):
             connection.send_message(message)
 
-
     def register(self):
         """Registers WebSocket commands"""
-        _LOGGER.debug("Registering WebSocket commands")
+        _LOGGER.debug("\tRegistering WebSocket commands")
 
         def subscribe_wrapper(hass, connection, msg):
             """Wrapper to invoke handle_subscribe."""
             hass.async_create_task(self.handle_subscribe(hass, connection, msg))
+
         def unsubscribe_wrapper(hass, connection, msg):
             """Wrapper to invoke handle_unsubscribe."""
             hass.async_create_task(self.handle_unsubscribe(hass, connection, msg))
+
         def known_points_wrapper(hass, connection, msg):
             """Wrapper to invoke handle_known_points."""
             hass.async_create_task(self.handle_known_points(hass, connection, msg))
@@ -699,61 +894,73 @@ class BPSEntityWebSocket:
             self.hass,
             "bps/subscribe",
             subscribe_wrapper,  # The wrapper handles async
-            schema=vol.Schema({
-                vol.Required("type"): "bps/subscribe", # Type for API
-                vol.Required("entities"): [str],
-                vol.Optional("id"): int,
-            }),
+            schema=vol.Schema(
+                {
+                    vol.Required("type"): "bps/subscribe",  # Type for API
+                    vol.Required("entities"): [str],
+                    vol.Optional("id"): int,
+                }
+            ),
         )
         async_register_command(
             self.hass,
             "bps/unsubscribe",
             unsubscribe_wrapper,  # The wrapper handles async
-            schema=vol.Schema({
-                vol.Required("type"): "bps/unsubscribe", # Type for API
-                vol.Required("entities"): [str],
-                vol.Optional("id"): int,
-            }),
+            schema=vol.Schema(
+                {
+                    vol.Required("type"): "bps/unsubscribe",  # Type for API
+                    vol.Required("entities"): [str],
+                    vol.Optional("id"): int,
+                }
+            ),
         )
         async_register_command(
             self.hass,
             "bps/known_points",
             known_points_wrapper,  # The wrapper handles async
-            schema=vol.Schema({
-                vol.Required("type"): "bps/known_points",  # Type for API
-                vol.Required("knownPoints"): vol.All(
-                    list,
-                    [vol.All([float, float, float])]  
-                ),
-                vol.Optional("id"): int,  
-                }),
+            schema=vol.Schema(
+                {
+                    vol.Required("type"): "bps/known_points",  # Type for API
+                    vol.Required("knownPoints"): vol.All(
+                        list, [vol.All([float, float, float])]
+                    ),
+                    vol.Optional("id"): int,
+                }
+            ),
         )
 
-        _LOGGER.info("All WebSocket commands registered successfully.")
-    
+        _LOGGER.info("\t\tAll WebSocket commands registered successfully.")
+
+
 # Trilateration function
 def trilaterate(known_points):
     num_points = len(known_points)
 
-    if num_points < 3: # Make sure there are enough points (min 3) to do a trilataration
+    if (
+        num_points < 3
+    ):  # Make sure there are enough points (min 3) to do a trilataration
         _LOGGER.error("At least three known points are required for trilateration.")
         return None
 
-    def objective_function(X, known_points): # Define the objective function loss for the least squares method.
+    def objective_function(
+        X, known_points
+    ):  # Define the objective function loss for the least squares method.
         x, y = X
         residuals = []
         for xi, yi, ri in known_points:
-            residual = np.sqrt((xi - x)**2 + (yi - y)**2) - ri
+            residual = np.sqrt((xi - x) ** 2 + (yi - y) ** 2) - ri
             residuals.append(residual)
         weights = 1.0 / np.array([ri**2 for _, _, ri in known_points])
         return np.sqrt(weights) * np.array(residuals)
 
-    x0 = np.array([0, 0]) # Initial guess value for unknown coordinates
+    x0 = np.array([0, 0])  # Initial guess value for unknown coordinates
 
-    result = least_squares(objective_function, x0, args=(known_points,)) # Perform weighting adjustment for the least squares method.
+    result = least_squares(
+        objective_function, x0, args=(known_points,)
+    )  # Perform weighting adjustment for the least squares method.
 
-    if not result.success: # Check if the fitting was successful
+    if not result.success:  # Check if the fitting was successful
         _LOGGER.error("Weighted nonlinear least squares fitting did not converge.")
         return None
-    x, y = result.x # Extract the calculated coordinates
-    return x, y # return the result
+    x, y = result.x  # Extract the calculated coordinates
+    return x, y  # return the result

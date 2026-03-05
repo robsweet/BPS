@@ -37,35 +37,10 @@ class CustomDistanceSensor(SensorEntity):
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
     """Set dynamic sensors based on the filtered entities"""
-    _LOGGER.info("async_setup_entry in sensor.py has been called")
+    # _LOGGER.info("Setting up our own sensors for each tracked device")
     
     if "bps_sensors" not in hass.data:
         hass.data["bps_sensors"] = {}
-
-    entities = get_filtered_entities(hass)
-    _LOGGER.info(f"Creating sensors for entities: {entities}")
-
-    existing_sensors = {state.entity_id for state in hass.states.async_all() if state.entity_id.startswith("sensor.")}
-
-    new_sensors = []
-    for entity in entities:
-        unique_zone_id = f"sensor.{entity}_bps_zone"
-        unique_zone_uid = f"bps_zone_{entity}"
-        unique_floor_id = f"sensor.{entity}_bps_floor"
-        unique_floor_uid = f"bps_floor_{entity}"
-
-        if not any(s.startswith(unique_zone_id) for s in existing_sensors):
-            sensor = CustomDistanceSensor(f"{entity} BPS Zone", unique_zone_uid)
-            hass.data["bps_sensors"][unique_zone_id] = sensor
-            new_sensors.append(sensor)
-
-        if not any(s.startswith(unique_floor_id) for s in existing_sensors):
-            sensor = CustomDistanceSensor(f"{entity} BPS Floor", unique_floor_uid)
-            hass.data["bps_sensors"][unique_floor_id] = sensor
-            new_sensors.append(sensor)
-
-    if new_sensors:
-        async_add_entities(new_sensors, update_before_add=True)
 
     @callback
     def state_changed_listener(event):

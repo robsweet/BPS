@@ -4,11 +4,13 @@
 //In the bottom of the page, create a new token. The name does not matter
 //Copy the token and below
 //Example: const hass_token = "my_secret_token";
-const hass_token = "";
+const hass_token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJkYjc4N2U1NjI4ZjY0OTZmOWVkNWIwZDg2ZDhkMDBlNiIsImlhdCI6MTc3MDkwMzg3OCwiZXhwIjoyMDg2MjYzODc4fQ.CAwdFUZBXYuSUj_jGBc4LyvTTmvAEgmMGq0PeZF3qBY";
 // Add your url that you use in your browser
 //Example1: const hassURL = "xxx.duckdns.org";
 //Example2: const hassURL = "192.168.0.10:8123";
-const hassURL = "";
+const hassURL = "ha.ldg.net";
+
+// test
 
 String.prototype.toRGB = function() {
     var hash = 0;
@@ -72,6 +74,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     let imgfilename = "";
     let device = "";
     let myScaleVal = null;
+    let stoptrackstat = false;
+    let bpsDataLoaded = false;
+	let mapLoaded = false;
+
+    let socket = null;
+    let tracked = [];
+    let NewEnts = [];
+    let socketIdCounter = 1;
 
     const newelement = `
                 <ul class="space-y-2" id="idxxx">
@@ -97,9 +107,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                 alert('Could not load maps.');
                 return false;
             }
-        
+
             const maps = await mapsResponse.json();
             mapSelector.innerHTML = '<option value="">--Please choose an option--</option>';
+            maps.sort();
             maps.forEach(map => {
                 const option = document.createElement('option');
                 option.value = map;
@@ -108,18 +119,26 @@ document.addEventListener('DOMContentLoaded', async () => {
             });
             return true;
         }
-        
-    
+
+
         // Once the maps are loaded, call fetchBPSData
         let tmpsaved = await getSavedMaps();
         if (tmpsaved){
-            fetchBPSData();
+            await fetchBPSData();
         }
 
-        let socket = null;
-        const tracked = [];
-        let NewEnts = [];
-        let socketIdCounter = 1; 
+        bpsDataLoaded = true;
+	    console.log("BPS Data loaded and UI ready.");
+
+        if (mapSelector.options.length > 1) {
+            mapSelector.selectedIndex = 1;
+			await changeMap();
+        }
+
+        if (entSelector.options.length > 1) {
+            entSelector.selectedIndex = 1;
+			await entSelected();
+        }
 
         function startTracking() {
             if (!checkCanvasImage()) return;
@@ -148,7 +167,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 alert(messageStr);
                 return;
             }
-            
+
             //Build the array with tracked devices
             if (device == ""){
                 alert("You must choose a device to track!");
@@ -159,19 +178,21 @@ document.addEventListener('DOMContentLoaded', async () => {
                 tracked.push(`${device}_distance_to_${entity.entity_id}`);
             });
 
+            tracked = tracked.filter((item, i, ar) => ar.indexOf(item) === i);
+
             // Check if there are enough points for trilateration
             if (tracked.length < 3) {
                 alert("At least three beacons are required for tracking.");
                 return;
             }
-    
+
             console.log("open socket");
             socket = new WebSocket("wss://"+hassURL+"/api/websocket");
             socket.onopen = () => {
                 // Send authentication
                 console.log("sending auth");
                 socket.send(JSON.stringify({ type: "auth", access_token: hass_token }));
-    
+
                 // Once authentication is complete, subscribe
                 socket.onmessage = async (event) => {
                     let message = JSON.parse(event.data);
@@ -186,7 +207,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                             entities: tracked,
                         }));
                     }
-            
+
                     if (message.type === "state_changed") {
                         await updateEntArray(message.entity_id, message.new_state);
                         socketIdCounter++;
@@ -204,7 +225,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     } else if (message.type === "tri_result" && !message.success) {
                         console.log("Tri Error: "+message);
                     }
-    
+
                     let current = false;
                     if (message.current_states && Array.isArray(message.current_states)) {
                         current = true;
@@ -249,7 +270,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             stoptrackbtn.style.display = "none";
         }
 
-        let stoptrackstat = false;
+
         function startTrackfunc(){
             stoptrackstat = false;
             starttrackbtn.style.display = "none";
@@ -290,7 +311,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             let newEid = eid.split("_distance_to_")[1];
             let index = NewEnts.findIndex(item => item.eid === newEid);
             if (state !== 'unknown') {
-                
+
                 let floor = finalcords.floor.find(floor => floor.name === SelMapName);
                 let rec = floor.receivers.find(element => element.entity_id === newEid);
                 if (index !== -1) {
@@ -304,20 +325,20 @@ document.addEventListener('DOMContentLoaded', async () => {
 //                            state * floor.scale      // Update z
                         ]
                     });
-                    
+
                 } else {
                     NewEnts.push({
-                        eid: newEid, 
+                        eid: newEid,
                         cords: [rec.cords.x, rec.cords.y, parseFloat(state) ]  // I think this already comes to the UI scaled
 //                        cords: [rec.cords.x, rec.cords.y, state * floor.scale]
                     });
                 }
-            } 
+            }
             if (state == 'unknown') {
                 if (index !== -1) {
                     //Remove the entity from the array
                     NewEnts = NewEnts.filter(item => item.eid !== newEid);
-                } 
+                }
             }
             await new Promise((resolve) => setTimeout(resolve, 100));
         }
@@ -327,6 +348,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // =================================================================
     const dataURL = null;
     let urlBol = false;
+    const max_ring_size_slider = document.getElementById("max_ring_size");
 
     function drawTracker(tricords){
         if(!urlBol){
@@ -335,7 +357,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             urlBol = true;
         }
         clearCanvas();
-        
+
         const iconSize = canvas.width * 0.04; // Adjust size as needed
         const x = tricords.x;
         const y = tricords.y;
@@ -347,7 +369,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         if (isChecked = document.getElementById("show_receiver_rings").checked) {
             NewEnts.forEach(rec => {
-              if (rec['cords'][2] < 50) {
+              if (rec['cords'][2] < parseFloat(max_ring_size_slider.value) ) {
                     const ctx = canvas.getContext('2d');
                     ctx.beginPath(); // Draw a circle
                     ctx.arc(rec['cords'][0], rec['cords'][1], (rec['cords'][2] * myScaleVal), 0, Math.PI * 2)
@@ -370,21 +392,21 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Function to fetch data from the API and display it on page
         async function fetchBPSData() {
             const apiUrl = "/api/bps/read_text"; // API endpoint to read the file
-        
+
             try {
                 const response = await fetch(apiUrl); // Make a GET request to the API
-        
+
             if (!response.ok) {
                 console.error("Failed to fetch BPS data:", response.statusText); // Handle error status
                 return;
             }
-        
+
             const data = await response.json();
-        
+
             finalcords = JSON.parse(data.coordinates);
             tmpfinalcords = finalcords; //Store original cords in a temp to compare later if it is changed
             console.log("Coordinates loaded:", finalcords);
-            let ents = data.entities;
+            let ents = data.entities.sort();
             console.log("Entities to track:", ents);
 
             entSelector.innerHTML = '<option value="">--Please choose an option--</option>';
@@ -401,16 +423,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         async function fetchBPSCords() {
-            const apiUrl = "/api/bps/cords"; 
-        
+            const apiUrl = "/api/bps/cords";
+
             try {
                 const response = await fetch(apiUrl); // Make a GET request to the API
-        
+
             if (!response.ok) {
                 console.error("Failed to fetch BPS data:", response.statusText); // Handle error status
                 return;
             }
-        
+
             const data = await response.json();
             return data;
 
@@ -420,8 +442,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         }
 
-        // Choose which entity to track
-        entSelector.addEventListener('change', async () => {
+        async function entSelected() {
             if(entSelector.value != "--Please choose an option--"){
                 console.log("väljare");
                 if (socket) {
@@ -434,9 +455,12 @@ document.addEventListener('DOMContentLoaded', async () => {
             } else {
                 starttrackbtn.style.display = "none";
             }
-        });
-    
-    
+		}
+
+        // Choose which entity to track
+        entSelector.addEventListener('change', async () => { await entSelected(); });
+
+
     // Check if the image is loaded in the canvas
     function checkCanvasImage() {
         if (canvas.width === 0 || canvas.height === 0) {
@@ -519,7 +543,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (event.target.closest('[data-type="collapse"]')) {
             const collapseDiv = event.target.closest('[data-type="collapse"]');
             const parent = collapseDiv.closest('.fixed'); // Find the nearest parent element to collapseDiv
-        
+
             // Toggle between minimized and normal size
             if (parent.classList.contains('collapsed')) {
                 // Reset size
@@ -546,7 +570,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Clear canvas functionality
     // =================================================================
 
-    clearCanvasButton.addEventListener('click', () => {
+    async function clearCanvasTriggered() {
         if (!checkCanvasImage()) return;
         removeListeners();
         drawAreaButton.remove();
@@ -560,7 +584,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         SelMapName = "";
         buttonreset();
         mapSelector.selectedIndex = 0;
-    });
+	}
+
+    clearCanvasButton.addEventListener('click', () => { clearCanvasTriggered(); });
 
     function clearCanvas(){
         ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -616,7 +642,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             let newZone = {
                 entity_id: zoneName,
                 cords: zonecords
-              }; 
+              };
             if(addDataToFloor(finalcords, SelMapName, "zones", newZone)){
                 alert(`Zone saved: ${zoneName}`);
                 console.log("Saved coordinates:", zonecords);
@@ -625,27 +651,27 @@ document.addEventListener('DOMContentLoaded', async () => {
                 clearCanvas();
                 drawElements();
             }
-            
+
         }
     });
 
     const handleSize = 15;
     function startDrawingZone(event) {
         const rect = canvas.getBoundingClientRect();
-        
+
         const scaleX = canvas.width / rect.width; // Horisontal scale
         const scaleY = canvas.height / rect.height; // Vertical scale
 
         const centerX = (event.clientX - rect.left) * scaleX;
         const centerY = (event.clientY - rect.top) * scaleY;
-    
+
         rectangle = {
             x: centerX - 100,
             y: centerY - 100,
             width: 200,
             height: 200
         };
-    
+
         handles = [
             { x: rectangle.x - handleSize, y: rectangle.y - handleSize },
             { x: rectangle.x + rectangle.width - handleSize, y: rectangle.y - handleSize },
@@ -654,7 +680,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         ];
 
         tmphandles = handles;
-    
+
         drawRectangle();
         canvas.removeEventListener("mousedown", startDrawingZone);
         canvas.addEventListener("mousedown", selectHandle);
@@ -670,7 +696,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     function drawRectangle() {
         clearCanvas();
         drawElements();
-    
+
         // Create the input field and place it above the line
         if (!zoneInputElement) {
             zoneInputElement = document.createElement("input");
@@ -682,13 +708,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         const rect = canvas.getBoundingClientRect();
-        
+
         const scaleX = canvas.width / rect.width; // Horisontal scale
         const scaleY = canvas.height / rect.height; // Vertical scale
 
         const inputPosition = {
             left: ((rectangle.x + (rectangle.width/2))/ scaleX) + canvas.offsetLeft - zoneInputElement.offsetWidth / 2 + 40,
-            top: (rectangle.y / scaleY) + canvas.offsetTop - 30 // 30 pixles above the line 
+            top: (rectangle.y / scaleY) + canvas.offsetTop - 30 // 30 pixles above the line
         };
 
         zoneInputElement.style.left = `${inputPosition.left - 20}px`;
@@ -702,7 +728,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         ctx.strokeStyle = "red";
         ctx.lineWidth = 2;
         ctx.stroke();
-    
+
         // Draw handles
         handles.forEach(handle => {
             ctx.beginPath();
@@ -718,7 +744,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const scaleY = canvas.height / rect.height; // Vertical scale
         const mouseX = (event.clientX - rect.left) * scaleX;
         const mouseY = (event.clientY - rect.top) * scaleY;
-    
+
         selectedHandle = handles.find(
             handle =>
                 mouseX >= handle.x - (handleSize * 2) &&
@@ -730,13 +756,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function resizeRectangle(event) {
         if (!selectedHandle) return;
-    
+
         const rect = canvas.getBoundingClientRect();
         const scaleX = canvas.width / rect.width; // Horisontal scale
         const scaleY = canvas.height / rect.height; // Vertical scale
         const mouseX = (event.clientX - rect.left) * scaleX;
         const mouseY = (event.clientY - rect.top) * scaleY;
-    
+
         if (selectedHandle === tmphandles[0]) {
             rectangle.width += rectangle.x - mouseX;
             rectangle.height += rectangle.y - mouseY;
@@ -754,7 +780,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             rectangle.width = mouseX - rectangle.x;
             rectangle.height = mouseY - rectangle.y;
         }
-    
+
         handles = [
             { x: rectangle.x - handleSize, y: rectangle.y - handleSize },
             { x: rectangle.x + rectangle.width - handleSize, y: rectangle.y - handleSize },
@@ -771,7 +797,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     let startPoint = null;
     let endPoint = null;
-    let scaleInputElement = null; 
+    let scaleInputElement = null;
 
     SetScaleButton.addEventListener("click", () => {
         if (!checkCanvasImage()) return;
@@ -853,7 +879,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             x: (startPoint.x + endPoint.x) / 2,
             y: (startPoint.y + endPoint.y) / 2
         };
-        
+
         const inputPosition = {
             left: (lineMidpoint.x / scaleX) + canvas.offsetLeft - scaleInputElement.offsetWidth / 2 + 40,
             top: (lineMidpoint.y / scaleY) + canvas.offsetTop - 30
@@ -888,7 +914,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const dy = endPoint.y - startPoint.y;
         const lineLength = Math.sqrt(dx * dx + dy * dy); // Calculate length of drawn line
         (`Line length: ${lineLength}`);
-        
+
         // Save scale
         myScaleVal = lineLength / scaleInput;
         if(addDataToFloor(finalcords, SelMapName, "scale", myScaleVal)){
@@ -913,7 +939,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (addDeviceButton.dataset.active === 'false') {
             buttonreset();
             messdiv.innerHTML = '<h4 class="font-medium mb-2">Instructions</h4><p class="text-sm text-gray-500">Please place BLE receivers by placing them on the floorplan. In the input element, enter the name of the receiver. If you have a Bermuda sensor named for example: "eriks_apple_watch_distance_to_nsp_kitchen" then the receiver name should be "nsp_kitchen"</p>';
-            
+
             canvas.addEventListener('click', placeReceiver);
             addDeviceButton.setAttribute('data-active', 'true');
             addDeviceButton.innerHTML = addDeviceButton.innerHTML.replace("Place Receiver","Save Receiver");
@@ -925,7 +951,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
             SelMapName = mapname.value;
             receiverName = document.getElementById('receiverName').value.trim();
-            
+
             if (!receiverName || !tmpcords) {
                 alert("Receiver coordinates must be set.");
                 return;
@@ -935,7 +961,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 entity_id: receiverName,
                 cords: tmpcords
               };
-            
+
             if(addDataToFloor(finalcords, SelMapName, "receivers", newReceiver)){
                 buttonreset();
                 entityInput.value = "";
@@ -993,7 +1019,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!Array.isArray(finalcords.floor)) {
             finalcords.floor = [];
         }
-        
+
         let floorExists = finalcords.floor.some(floor => floor.name === floorName); // Check if floor exists
 
         if (!floorExists) {
@@ -1007,8 +1033,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             console.log(`Added new floor: ${floorName}`);
         } else {
             console.log(`Floor '${floorName}' already exists.`);
-        }    
-        
+        }
+
         let floor = finalcords.floor.find(floor => floor.name === floorName); // Find correct floor
 
         if (floor) {
@@ -1108,7 +1134,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             });
         }
 
-        let tmpHTMLrec = ""; 
+        let tmpHTMLrec = "";
         let tmpHTMLzone = "";
         tmpdrawcords.forEach((item, index) => {
 
@@ -1134,7 +1160,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const y = item.cords[0].y;
                 const w = item.cords[1].x - x;
                 const h = item.cords[2].y - y;
-                
+
                 // Draw rectangle
                 ctx.beginPath();
                 ctx.rect(x, y, w, h);
@@ -1164,8 +1190,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     }
 
-    // Display selected map
-    mapSelector.addEventListener('change', async () => {
+    async function changeMap() {
         img.src = `/local/bps_maps/${mapSelector.value}`;
         imgfilename = mapSelector.value;
         mapname.value = removeExtension(mapSelector.value);
@@ -1173,12 +1198,20 @@ document.addEventListener('DOMContentLoaded', async () => {
         await setupCanvasWithImage(img, canvas);
         new_floor = false;
         drawElements();
-    });
+        if (mapSelector.selectedIndex == 0) {
+		    mapLoaded = false;
+		    clearCanvasButton.click();
+	    }
+	    mapLoaded = true;
+	}
+
+    // Display selected map
+    mapSelector.addEventListener('change', async () => { await changeMap(); });
 
     upload.addEventListener('change', event => {
         const file = event.target.files[0];
         if (!file) return;
-    
+
         const reader = new FileReader();
         reader.onload = function () {
             img.src = reader.result;
@@ -1191,12 +1224,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     function setupCanvasWithImage(img, canvas) {
         return new Promise((resolve) => {
             const ctx = canvas.getContext('2d');
-            
+
             img.onload = () => {
                 setupImageSize(img, canvas);
                 resolve(); // Resolve when completed
             };
-    
+
             // Add the buttons
             drawAreaButton.className = 'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&amp;_svg]:pointer-events-none [&amp;_svg]:size-4 [&amp;_svg]:shrink-0 border border-input bg-background hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2';
             drawAreaButton.innerHTML = `
@@ -1218,19 +1251,19 @@ document.addEventListener('DOMContentLoaded', async () => {
                     Set Scale
                 `;
             SetScaleButton.setAttribute('data-active', 'false');
-            
+
             clearCanvasButton.className = 'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 border border-input bg-background hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2';
             clearCanvasButton.innerHTML = `
                 <svg width="24px" height="24px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M9 9L15 15" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M15 9L9 15" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="9" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
                     Clear Canvas
                 `;
-            
+
             saveButton.className = 'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&amp;_svg]:pointer-events-none [&amp;_svg]:size-4 [&amp;_svg]:shrink-0 bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2';
             saveButton.innerHTML = `
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-save w-4 h-4 mr-2" data-component-name="Save"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"></path><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"></path><path d="M7 3v4a1 1 0 0 0 1 1h7"></path></svg>
                     Save Floor Plan
                 `;
-            
+
             mapbuttondiv.appendChild(addDeviceButton);
             mapbuttondiv.appendChild(drawAreaButton);
             mapbuttondiv.appendChild(SetScaleButton);
@@ -1241,19 +1274,19 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function setupImageSize(img, canvas, fixedWidth = 2000) {
         const ctx = canvas.getContext('2d');
-    
+
         const imgratio = img.height / img.width;
         const newwidth = fixedWidth; // Fixed width in pixels
         const newheight = newwidth * imgratio; // Height based on aspect ratio
-    
+
         // Update canvas size
         canvas.width = newwidth;
         canvas.height = newheight;
-    
+
         // Draw image on canvas
         ctx.drawImage(img, 0, 0, newwidth, newheight);
     }
-    
+
 
     function removeExtension(fileName) {
         const lastDotIndex = fileName.lastIndexOf('.');
@@ -1302,10 +1335,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             alert("You have not added a scale, it won't work without it!");
             return;
         }
-        
+
         removeListeners();
         const data = new FormData();
-        data.append('coordinates', JSON.stringify(finalcords)); 
+        data.append('coordinates', JSON.stringify(finalcords));
         data.append('new_floor', new_floor);
 
         if(removefile === true && new_floor === false){
@@ -1346,5 +1379,4 @@ document.addEventListener('DOMContentLoaded', async () => {
             alert('Error saving data!');
         }
     }
-
 });
