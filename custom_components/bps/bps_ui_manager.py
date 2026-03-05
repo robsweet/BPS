@@ -4,15 +4,13 @@
 import logging
 from pathlib import Path
 
-import debugpy  # noqa: T100
-
 from homeassistant.components import panel_custom
 from homeassistant.components.frontend import (
     # async_register_built_in_panel,
     async_remove_panel,
 )
 from homeassistant.components.http import StaticPathConfig
-from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.core import HomeAssistant
 
 # from homeassistant.helpers import (
 #     area_registry as ar,
@@ -21,7 +19,7 @@ from homeassistant.core import HomeAssistant, ServiceCall, callback
 #     floor_registry as fr,
 # )
 # from homeassistant.helpers.template import Template
-from . import DOMAIN, BPSRuntimeData, BPSStoredData
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -38,12 +36,6 @@ class BPSUiManager:
         self.bps_data = bps_data
         self.floor_data = bps_data.map_data
         self.runtime_data = runtime_data
-
-    @callback
-    def handle_launch_debugger(self, call: ServiceCall) -> None:
-        """Handle the service action call."""
-        debugpy.wait_for_client()  # noqa: T100
-        debugpy.breakpoint()  # noqa: T100
 
     async def async_config(self) -> bool:
         """Configure the UI components for the integration."""

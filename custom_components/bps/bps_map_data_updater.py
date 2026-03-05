@@ -12,7 +12,6 @@ from homeassistant.helpers import (
 )
 
 # from homeassistant.helpers.template import Template
-from . import BPSMapData, BPSRuntimeData
 
 _LOGGER = logging.getLogger(__name__)
 

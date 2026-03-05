@@ -1,5 +1,7 @@
 """Bluetooth Positioning System (BPS) integration for Home Assistant."""
 
+import asyncio
+from dataclasses import dataclass
 import logging
 from pathlib import Path
 
@@ -7,16 +9,20 @@ import aiofiles
 import aiofiles.os
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.helpers import entity_registry as er
 
-from . import DOMAIN, PLATFORMS, BPSMapDataUpdater, BPSTriDataUpdater, BPSUiManager
+from .bps_map_data_updater import BPSMapDataUpdater
+from .bps_tri_data_updater import BPSTriDataUpdater
+from .bps_ui_manager import BPSUiManager
+from .const import DOMAIN, PLATFORMS
 
 # type BPSConfigEntry = ConfigEntry[BPSMapData, BPSRuntimeData]
 
 _LOGGER = logging.getLogger(__name__)
 
 
+@dataclass
 class BPSMapData:
     """Data structure to hold all the BPS map-related data."""
 
@@ -35,6 +41,7 @@ class BPSMapData:
         ]
 
 
+@dataclass
 class BPSStoredData:
     """Data structure to hold all BPS-related data under hass.data[DOMAIN].
 
@@ -46,6 +53,7 @@ class BPSStoredData:
         self.map_data: BPSMapData = BPSMapData()
 
 
+@dataclass
 class BPSRuntimeData:
     """Data structure to hold trilateration data.
 
@@ -72,6 +80,21 @@ class BPSRuntimeData:
         self.bps_ui_manager: BPSUiManager = BPSUiManager(
             hass, self.integration_data, entry.runtime_data
         )
+        self.my_tracker_entities = []  # List to hold entity IDs of the tracker entities created by this integration
+
+
+@callback
+def handle_launch_debugger(self, call: ServiceCall) -> None:
+    """Handle the service action call."""
+    import debugpy  # noqa: T100
+
+    all.hass.async_create_task(debugpy.wait_for_client())  # noqa: T100
+    asyncio.sleep(10)  # Sleep for 10 seconds to allow attaching the debugger
+    if debugpy.is_client_connected():  # noqa: T100
+        debugpy.breakpoint()  # noqa: T100
+        return True
+
+    return False
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -96,7 +119,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.async_create_task(updater.update_tracked_entities)
     _LOGGER.info("The BPS integration is fully initialized")
 
-    returns.append(entry.runtime_data.bps_ui_manager.async_config())
+    returns.append(entry.runtime_data.bps_ui_manager.async_config)
     return returns
 
 
@@ -109,14 +132,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.info("Removing sensors for integration unload")
     entity_registry = er.async_get(hass)
 
-    # Find and remove all entities that belong to "bps"
-    entities_to_remove = [
+    for entity_id in [
         entity.entity_id
         for entity in entity_registry.entities.values()
         if entity.platform == "bps"
-    ]
-
-    for entity_id in entities_to_remove:
+    ]:
         _LOGGER.info("\tRemoving sensor: %s", entity_id)
         entity_registry.async_remove(entity_id)
     _LOGGER.info("Done removing sensors")

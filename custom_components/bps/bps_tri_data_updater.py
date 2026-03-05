@@ -10,7 +10,7 @@ from shapely.geometry import Point, Polygon
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.template import Template
 
-from . import DOMAIN, BPSMapData, BPSRuntimeData
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
