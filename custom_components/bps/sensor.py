@@ -1,14 +1,22 @@
-from homeassistant.components.sensor import SensorEntity
-from homeassistant.core import callback
+"""Custom BPS sensors for Home Assistant."""
+
 import logging
+
+from homeassistant.components.sensor import SensorEntity
+from homeassistant.core import HomeAssistant, callback
 
 _LOGGER = logging.getLogger(__name__)
 
 DOMAIN = "bps_sensors"
 
-def get_filtered_entities(hass):
-    """Fetch and filter sensors based on their entity_id"""
-    sensors = [state for state in hass.states.async_all() if state.entity_id.startswith("sensor.")]
+
+def get_filtered_entities(hass: HomeAssistant):
+    """Fetch and filter sensors based on their entity_id."""
+    sensors = [
+        state
+        for state in hass.states.async_all()
+        if state.entity_id.startswith("sensor.")
+    ]
     filtered = [
         state.entity_id.replace("sensor.", "").split("_distance_to_")[0]
         for state in sensors
@@ -16,39 +24,50 @@ def get_filtered_entities(hass):
     ]
     return list(set(filtered))
 
+
 class CustomDistanceSensor(SensorEntity):
-    """A representation of a custom sensor"""
-    def __init__(self, name, unique_id):
+    """A representation of a custom sensor."""
+
+    def __init__(self, name, unique_id) -> None:
+        """Initialize the sensor."""
         self._name = name
         self._unique_id = unique_id
         self._state = "unknown"
-    
+
     @property
     def name(self):
+        """Return the name of the sensor."""
         return self._name
-    
+
     @property
     def unique_id(self):
+        """Return the unique ID of the sensor."""
         return self._unique_id
-    
+
     @property
     def state(self):
+        """Return the state of the sensor."""
         return self._state
 
-async def async_setup_entry(hass, config_entry, async_add_entities):
-    """Set dynamic sensors based on the filtered entities"""
+
+async def async_setup_entry(hass: HomeAssistant, config_entry, async_add_entities):
+    """Set dynamic sensors based on the filtered entities."""
     # _LOGGER.info("Setting up our own sensors for each tracked device")
-    
+
     if "bps_sensors" not in hass.data:
         hass.data["bps_sensors"] = {}
 
     @callback
     def state_changed_listener(event):
-        """Listen for state changes to update dynamic sensors"""
+        """Listen for state changes to update dynamic sensors."""
         new_entities = get_filtered_entities(hass)
         new_sensors = []
 
-        existing_sensors = {state.entity_id for state in hass.states.async_all() if state.entity_id.startswith("sensor.")}
+        existing_sensors = {
+            state.entity_id
+            for state in hass.states.async_all()
+            if state.entity_id.startswith("sensor.")
+        }
 
         for entity in new_entities:
             unique_zone_id = f"sensor.{entity}_bps_zone"
@@ -72,6 +91,8 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     hass.bus.async_listen("state_changed", state_changed_listener)
 
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
-    """If using configuration in configuration.yaml"""
+async def async_setup_platform(
+    hass: HomeAssistant, config, async_add_entities, discovery_info=None
+):
+    """If using configuration in configuration.yaml."""
     await async_setup_entry(hass, config, async_add_entities)
