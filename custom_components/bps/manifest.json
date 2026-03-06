@@ -1,6 +1,7 @@
 {
     "domain": "bps",
     "name": "BLE Positioning System",
+    "version": "0.0.1",
     "codeowners":
     [
         "@Hogster"
@@ -9,9 +10,13 @@
     "single_config_entry": true,
     "dependencies":
     [
-        "http", 
-        "frontend", 
-        "panel_custom"
+        "bermuda",
+        "bluetooth_adapters",
+        "device_tracker",
+        "frontend",
+        "http",
+        "panel_custom",
+        "private_ble_device"
     ],
     "documentation": "https://github.com/Hogster/BPS",
     "integration_type": "device",
@@ -24,5 +29,10 @@
         "scipy>=1.10.1",
         "shapely>=2.0.2"
     ],
-    "version": "0.0.0"
+    "bluetooth": [
+    {
+      "connectable": false,
+      "manufacturer_id": 76
+    }
+    ]
 }

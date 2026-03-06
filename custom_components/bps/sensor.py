@@ -4,10 +4,9 @@ import logging
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 
 _LOGGER = logging.getLogger(__name__)
-
-DOMAIN = "bps_sensors"
 
 
 def get_filtered_entities(hass: HomeAssistant):
@@ -63,25 +62,29 @@ async def async_setup_entry(hass: HomeAssistant, config_entry, async_add_entitie
         new_entities = get_filtered_entities(hass)
         new_sensors = []
 
-        existing_sensors = {
-            state.entity_id
-            for state in hass.states.async_all()
-            if state.entity_id.startswith("sensor.")
-        }
+        entity_registry = er.async_get(hass)
 
-        for entity in new_entities:
-            unique_zone_id = f"sensor.{entity}_bps_zone"
-            unique_zone_uid = f"bps_zone_{entity}"
-            unique_floor_id = f"sensor.{entity}_bps_floor"
-            unique_floor_uid = f"bps_floor_{entity}"
+        existing_sensors = [
+            entity.entity_id
+            for entity in entity_registry.entities.values()
+            if entity.platform == "bps"
+        ]
 
-            if not any(s.startswith(unique_zone_id) for s in existing_sensors):
-                sensor = CustomDistanceSensor(f"{entity} BPS Zone", unique_zone_uid)
-                hass.data["bps_sensors"][unique_zone_id] = sensor
+        for entity_id in new_entities:
+            unique_area_id = f"sensor.{entity_id}_bps_area"
+            unique_area_uid = f"bps_area_{entity_id}"
+            unique_floor_id = f"sensor.{entity_id}_bps_floor"
+            unique_floor_uid = f"bps_floor_{entity_id}"
+
+            if not any(s.startswith(unique_area_id) for s in existing_sensors):
+                sensor = CustomDistanceSensor(f"{entity_id} BPS Area", unique_area_uid)
+                hass.data["bps_sensors"][unique_area_id] = sensor
                 new_sensors.append(sensor)
 
             if not any(s.startswith(unique_floor_id) for s in existing_sensors):
-                sensor = CustomDistanceSensor(f"{entity} BPS Floor", unique_floor_uid)
+                sensor = CustomDistanceSensor(
+                    f"{entity_id} BPS Floor", unique_floor_uid
+                )
                 hass.data["bps_sensors"][unique_floor_id] = sensor
                 new_sensors.append(sensor)
 

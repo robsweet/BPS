@@ -58,9 +58,7 @@ class BPSTriDataUpdater:
 
             if not self.floor_data.floors:
                 self.hass.data[DOMAIN] = (
-                    self.runtime_data.bps_map_data_updater.generate_new_floor_data(
-                        self.hass
-                    )
+                    self.runtime_data.bps_map_data_updater.generate_new_floor_data()
                 )
 
             if not any([floor.scale for floor in self.floor_data.floors.values()]):  # noqa: C419

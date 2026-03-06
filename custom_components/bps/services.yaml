@@ -1,0 +1,2 @@
+bps_debug:
+  name: Try to attach the debugpy debugger

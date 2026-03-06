@@ -40,10 +40,6 @@ class BPSUiManager:
     async def async_config(self) -> bool:
         """Configure the UI components for the integration."""
 
-        self.hass.services.async_register(
-            DOMAIN, "launch_debugger", self.handle_launch_debugger
-        )
-
         # Ensure the panel is registered.
         _LOGGER.debug("\tBPS: Ensuring panel registration")
 

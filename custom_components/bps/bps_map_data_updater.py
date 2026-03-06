@@ -67,6 +67,8 @@ class BPSMapDataUpdater:
                 fresh_data.areas[area.id] = my_area
                 fresh_data.floors[floor.floor_id]["areas"].append(my_area)
 
+        # TODO:  Figure out how/when to get receiver -> floor data mapping
+
         receiver_ids = {
             re.sub(".*_distance_to_", "", key)
             for key in self.hass.data["entity_info"]
@@ -82,3 +84,11 @@ class BPSMapDataUpdater:
             fresh_data.receivers.append(my_rec)
 
         return fresh_data
+
+    # TODO: Implement floor change handling
+    # TODO: Implement area change handling
+    # TODO: Implement tracker change handling?
+
+    async def handle_update_floor_data(self, call: ServiceCall) -> None:
+        """Handle the listener callback."""
+        pass

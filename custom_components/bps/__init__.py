@@ -11,6 +11,7 @@ import aiofiles.os
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.device_registry import EVENT_HOMEASSISTANT_STARTED
 
 from .bps_map_data_updater import BPSMapDataUpdater
 from .bps_tri_data_updater import BPSTriDataUpdater
@@ -72,29 +73,31 @@ class BPSRuntimeData:
         self.stop_integration: bool = False
         self.ready_to_collect: bool = False
         self.bps_map_data_updater: BPSMapDataUpdater = BPSMapDataUpdater(
-            hass, self.integration_data, entry.runtime_data.map_data
+            hass, self.integration_data.map_data, self
         )
         self.bps_tri_data_updater: BPSTriDataUpdater = BPSTriDataUpdater(
-            hass, self.integration_data, entry.runtime_data
+            hass, self.integration_data.map_data, self
         )
         self.bps_ui_manager: BPSUiManager = BPSUiManager(
-            hass, self.integration_data, entry.runtime_data
+            hass, self.integration_data, self
         )
         self.my_tracker_entities = []  # List to hold entity IDs of the tracker entities created by this integration
 
 
 @callback
-def handle_launch_debugger(self, call: ServiceCall) -> None:
+def handle_launch_debugger(call: ServiceCall) -> None:
     """Handle the service action call."""
-    import debugpy  # noqa: T100
+    import debugpy  # noqa: T100 PLC0415
 
-    all.hass.async_create_task(debugpy.wait_for_client())  # noqa: T100
-    asyncio.sleep(10)  # Sleep for 10 seconds to allow attaching the debugger
-    if debugpy.is_client_connected():  # noqa: T100
-        debugpy.breakpoint()  # noqa: T100
-        return True
+    hass = call.hass
+    stored_data = hass.data[DOMAIN]  # noqa: F841
+    runtime_data = hass.config_entries.async_entries(DOMAIN)[0].runtime_data  # noqa: F841
 
-    return False
+    # TODO:  Figure out how to have a reasonable timeout for wait_for_client()
+
+    debugpy.wait_for_client()  # noqa: T100
+    debugpy.breakpoint()  # noqa: T100
+    return None  # noqa: RET501 PLR1711
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -104,9 +107,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, BPSStoredData())
     entry.runtime_data = BPSRuntimeData(hass, entry)
 
-    returns = await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    target_dir = Path.joinpath(hass.config.path(), "www", "bps_maps")
+    target_dir = Path().joinpath(hass.config.path(), "www", "bps_maps")
     try:
         await aiofiles.os.makedirs(target_dir, exist_ok=True)
         _LOGGER.info("\tFolder %s has been created or already existed", target_dir)
@@ -116,11 +119,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     updater = BPSTriDataUpdater(hass, hass.data[DOMAIN].map_data, entry.runtime_data)
     hass.data["bps_initialized"] = True
-    hass.async_create_task(updater.update_tracked_entities)
+    hass.async_create_task(updater.update_tracked_entities())
     _LOGGER.info("The BPS integration is fully initialized")
 
-    returns.append(entry.runtime_data.bps_ui_manager.async_config)
-    return returns
+    # TODO:  Create task to call entry.runtime_data.bps_ui_manager.async_config() to set up the UI components for the integration
+    # hass.async_create_task(entry.runtime_data.bps_ui_manager.async_config())
+
+    hass.services.async_register(DOMAIN, "bps_debug", handle_launch_debugger)
+
+    async def handle_homeassistant_started(event):
+        """Handle the Home Assistant start event."""
+        _LOGGER.info(
+            "Home Assistant has started. Performing post-start initialization tasks for BPS"
+        )
+        entry.runtime_data.ready_to_collect = True
+        _LOGGER.info("BPS is now ready to collect data")
+
+    hass.bus.async_listen_once(
+        EVENT_HOMEASSISTANT_STARTED, handle_homeassistant_started
+    )
+
+    return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
