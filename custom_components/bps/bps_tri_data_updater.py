@@ -50,20 +50,15 @@ class BPSTriDataUpdater:
     async def cannot_trilaterate(self, message):
         """Handle cases where trilateration can't be performed."""
         _LOGGER.info(message)
-        await asyncio.sleep(self.update_frequency)  # Wait before trying again
+        await asyncio.sleep(10)  # Wait before trying again
 
     async def update_tracked_entities(self):
         """Update tracked_entities with the result of trilateration once per second."""
 
         while not self.runtime_data.stop_integration:
             if not self.runtime_data.ready_to_collect:
-                await asyncio.sleep(self.update_frequency)
+                await asyncio.sleep(10)
                 continue  # Wait until the system is ready to collect data
-
-            if not self.map_data.floors:
-                self.hass.data[DOMAIN] = (
-                    self.runtime_data.bps_map_data_updater.generate_new_map_data()
-                )
 
             if not any([floor.scale for floor in self.map_data.floors.values()]):  # noqa: C419
                 await self.cannot_trilaterate(

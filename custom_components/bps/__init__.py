@@ -7,7 +7,7 @@ from pathlib import Path
 import aiofiles
 import aiofiles.os
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import EVENT_HOMEASSISTANT_STARTED
@@ -66,19 +66,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.services.async_register(DOMAIN, "bps_debug", handle_launch_debugger)
 
-    async def handle_homeassistant_started(event):
-        """Handle the Home Assistant start event."""
+    async def handle_bermuda_state_change(event):
+        """Handle the Bermuda integration state change event."""
+        # hass.config_entries.async_entries('bermuda')[0].state == ConfigEntryState.LOADED
+        if event.data.get("new_state") == ConfigEntryState.LOADED:
+            _LOGGER.info(
+                "Bermuda integration has loaded, performing BPS post-start initialization tasks"
+            )
+
+            if not entry.runtime_data.floors:
+                hass.data[
+                    DOMAIN
+                ].map_data = (
+                    entry.runtime_data.bps_map_data_updater.generate_new_map_data()
+                )
+            entry.runtime_data.ready_to_collect = True
+            _LOGGER.info("BPS is now ready to collect data")
         _LOGGER.info(
-            "Home Assistant has started. Performing post-start initialization tasks for BPS"
+            "Bermuda has started. Performing post-start initialization tasks for BPS"
         )
+
+    if hass.config_entries.async_entries("bermuda")[0].state == ConfigEntryState.LOADED:
         entry.runtime_data.ready_to_collect = True
         _LOGGER.info("BPS is now ready to collect data")
-
-    # TODO:  Change this to just wait until states exists instead of doing handle_homeassistant_started?
-
-    hass.bus.async_listen_once(
-        EVENT_HOMEASSISTANT_STARTED, handle_homeassistant_started
-    )
+    else:
+        hass.config_entries.async_entries("bermuda")[0].async_on_unload(
+            hass.config_entries.async_entries("bermuda")[0].async_on_state_change(
+                handle_bermuda_state_change
+            )
+        )
 
     return True
 

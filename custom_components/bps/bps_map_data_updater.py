@@ -43,6 +43,8 @@ class BPSMapDataUpdater:
         # ent_reg = er.async_get(self.hass)
         # dev_reg = dr.async_get(self.hass)
 
+        from .data_classes import BPSMapData
+
         fresh_data = BPSMapData()
 
         if not floor_reg.async_list_floors():
