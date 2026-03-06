@@ -4,20 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 
 import numpy as np
 from scipy.optimize import least_squares
 from shapely.geometry import Point, Polygon
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.template import Template
 
 from .const import DOMAIN
-
-from typing import TYPE_CHECKING
+from .sensor import CustomDistanceSensor
 
 if TYPE_CHECKING:
-    from .data_classes import BPSMapData, BPSRuntimeData
+    from .data_classes import BPSData, BPSRuntimeData
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,48 +38,83 @@ class BPSTriDataUpdater:
     def __init__(
         self,
         hass: HomeAssistant,
-        map_data: BPSMapData,
+        stored_data: BPSData,
         runtime_data: BPSRuntimeData,
         update_frequency=1,
     ) -> None:
         """Initialize the data updater."""
         self.hass = hass
-        self.map_data = map_data
+        self.stored_data = stored_data
         self.runtime_data = runtime_data
         self.update_frequency = update_frequency
+        self.entity_registry = er.async_get(self.hass)
 
     async def cannot_trilaterate(self, message):
         """Handle cases where trilateration can't be performed."""
         _LOGGER.info(message)
         await asyncio.sleep(10)  # Wait before trying again
 
+    async def ensure_sensors_exist_for(self, tracker_id):
+        """Ensure sensors exist for the given tracker_id."""
+
+        sensors_to_add = []
+
+        unique_area_id = f"sensor.{tracker_id}_bps_area"
+        unique_area_uid = f"bps_area_{tracker_id}"
+        unique_floor_id = f"sensor.{tracker_id}_bps_floor"
+        unique_floor_uid = f"bps_floor_{tracker_id}"
+
+        if unique_area_id not in self.runtime_data.bps_tracker_entities:
+            _LOGGER.debug("Creating new sensor for area: %s", unique_area_id)
+            sensor = CustomDistanceSensor(f"{tracker_id} BPS Area", unique_area_uid)
+            self.runtime_data.bps_tracker_entities.append(sensor)
+            sensors_to_add.append(sensor)
+        else:
+            _LOGGER.debug("Sensor for area %s already exists", unique_area_id)
+
+        if unique_floor_id not in self.runtime_data.bps_tracker_entities:
+            _LOGGER.debug("Creating new sensor for floor: %s", unique_floor_id)
+            sensor = CustomDistanceSensor(f"{tracker_id} BPS Floor", unique_floor_uid)
+            self.runtime_data.bps_tracker_entities.append(sensor)
+            sensors_to_add.append(sensor)
+        else:
+            _LOGGER.debug("Sensor for floor %s already exists", unique_floor_id)
+
+        await self.hass.async_add_entities(sensors_to_add, update_before_add=True)
+
     async def update_tracked_entities(self):
         """Update tracked_entities with the result of trilateration once per second."""
 
+        _LOGGER.info("Starting BPS tracker updating loop")
         while not self.runtime_data.stop_integration:
-            if not self.runtime_data.ready_to_collect:
-                await asyncio.sleep(10)
+            if not self.runtime_data.bps_map_data_updater.ready():
+                await self.cannot_trilaterate(
+                    "Map data is not ready yet from map data updater"
+                )
                 continue  # Wait until the system is ready to collect data
 
-            if not any([floor.scale for floor in self.map_data.floors.values()]):  # noqa: C419
+            if not any(
+                [
+                    floor["scale"]
+                    for floor in list(self.stored_data.map_data.floors.values())
+                ]  # noqa: C419
+            ):
                 await self.cannot_trilaterate(
                     "No floors have scale data.  Maps probably haven't been set up in the BPS UI."
                 )
                 continue  # start over
 
-            if len(self.map_data.receivers_with_coords(self.map_data)) < 3:
+            if len(self.stored_data.map_data.receivers_with_coords()) < 3:
                 await self.cannot_trilaterate(
-                    f"Only {len(self.map_data.receivers_with_coords(self.map_data))} receivers have coords.  Place at least 3 receivers in the BPS UI."
+                    f"Only {len(self.stored_data.map_data.receivers_with_coords())} receivers have coords.  Place at least 3 receivers in the BPS UI."
                 )
                 continue  # start over
 
-            try:
-                template = Template(self.DISTANCE_ENTITIES_JINJA, self.hass)
-                bermuda_entities = template.async_render()
-            except Exception:
-                _LOGGER.exception(
-                    "Can't find distance entities - Error executing Jinja code"
-                )
+            bermuda_entities = [
+                entity.entity_id
+                for entity in list(self.entity_registry.entities.values())
+                if entity.platform == "bermuda"
+            ]
 
             new_tricoords = {}
 
@@ -87,18 +123,18 @@ class BPSTriDataUpdater:
                 item.replace("sensor.", "").split("_distance_to_")
                 for item in bermuda_entities
             ]:
-                if not self.map_data.receivers[receiver_id]["coords"]:
+                if not self.stored_data.map_data.receivers[receiver_id]["coords"]:
                     _LOGGER.debug(
                         "Receiver %s has not been placed using the BPS UI", receiver_id
                     )
                     continue
 
-                if not self.map_data.floors[
-                    self.map_data.receivers[receiver_id]["floor"]
+                if not self.stored_data.map_data.floors[
+                    self.stored_data.map_data.receivers[receiver_id]["floor"]
                 ]["scale"]:
                     _LOGGER.debug(
                         "Scale not set for floor '%s'. Skipping receiver %s",
-                        self.map_data.receivers[receiver_id]["floor"],
+                        self.stored_data.map_data.receivers[receiver_id]["floor"],
                         receiver_id,
                     )
                     continue
@@ -121,12 +157,18 @@ class BPSTriDataUpdater:
                 for tracker_id in new_tricoords.keys()  # noqa: SIM118
             ]
 
-            await asyncio.gather(tracker_state_tasks)
+            tricoords_updates = await asyncio.gather(tracker_state_tasks)
+
+            for tracker_id, area, floor in tricoords_updates:
+                await self.ensure_sensors_exist_for(tracker_id)
+                self.hass.states.async_set(f"sensor.{tracker_id}_bps_area", area)
+                self.hass.states.async_set(f"sensor.{tracker_id}_bps_floor", floor)
 
             self.runtime_data.tricoords = new_tricoords
             await asyncio.sleep(
                 self.update_frequency
             )  # Run every X seconds, set timer in global variables
+        _LOGGER.info("Finished BPS tracker updating loop")
 
     async def update_receiver_state(self, new_tricoords, tracker_id, receiver_id):
         """Update receiver state and radius in new_tricoords."""
@@ -136,15 +178,15 @@ class BPSTriDataUpdater:
         rcvr = {
             "state": self.hass.states.get(entity_id),
             "radius": None,
-            "coords": self.map_data.receivers[receiver_id]["coords"],
+            "coords": self.stored_data.map_data.receivers[receiver_id]["coords"],
         }
 
         if rcvr["state"] is None:
             _LOGGER.debug("Entity had no value: %s", entity_id)
         else:
             try:
-                scale = self.map_data.floors[
-                    self.map_data.receivers[receiver_id]["floor"]
+                scale = self.stored_data.map_data.floors[
+                    self.stored_data.map_data.receivers[receiver_id]["floor"]
                 ]["scale"]
                 state = float(rcvr["state"])
                 rcvr["radius"] = scale * state
@@ -163,7 +205,7 @@ class BPSTriDataUpdater:
         self.runtime_data.cache.setdefault("position_history", {})
 
         closest_floor_id = self.find_closest_floor_id(new_tricoords[tracker_id])
-        closest_floor_name = self.map_data[closest_floor_id]["name"]
+        closest_floor_name = self.stored_data.map_data[closest_floor_id]["name"]
 
         receiver_ids_on_floor = [
             receiver_id
@@ -218,10 +260,8 @@ class BPSTriDataUpdater:
             area = self.find_area_for_point(closest_floor_id, test_point)
             new_tricoords[tracker_id].merge({"cords": [avg_x, avg_y], "area": area})
 
-            self.hass.states.async_set(f"sensor.{tracker_id}_bps_area", area)
-            self.hass.states.async_set(
-                f"sensor.{tracker_id}_bps_floor", closest_floor_name
-            )
+            return [tracker_id, area, closest_floor_name]
+        return ["Unknown", "Unknown", "Unknown"]
 
     def find_closest_floor_id(self, receivers):
         """Find closest floor and filter receiver cords."""
@@ -233,7 +273,9 @@ class BPSTriDataUpdater:
         buffer_candidates = []
 
         for area in [
-            area for area in self.map_data.areas if area["floor_id"] == closest_floor_id
+            area
+            for area in self.stored_data.map_data.areas
+            if area["floor_id"] == closest_floor_id
         ]:
             polygon = Polygon([(coord["x"], coord["y"]) for coord in area["cords"]])
             xs = [coord["x"] for coord in area["cords"]]
@@ -289,3 +331,37 @@ class BPSTriDataUpdater:
             return None
         x, y = result.x  # Extract the calculated coordinates
         return x, y  # return the result
+
+    async def async_unload(self) -> bool:
+        """Ensure BPS tracking entities are removed."""
+
+        _LOGGER.debug("Removing sensors for integration unload")
+        entity_registry = er.async_get(self.hass)
+
+        for entity_id in [
+            entity.entity_id
+            for entity in entity_registry.entities.values()
+            if entity.platform == "bps"
+        ]:
+            _LOGGER.debug("\tRemoving sensor: %s", entity_id)
+            entity_registry.async_remove(entity_id)
+
+        await asyncio.sleep(2)
+        not_removed = 0
+        for entity_id in [
+            entity.entity_id
+            for entity in entity_registry.entities.values()
+            if entity.platform == "bps"
+        ]:
+            not_removed += 1
+            _LOGGER.debug("\tSensor still exists after unload: %s", entity_id)
+
+        if not_removed:
+            _LOGGER.warning(
+                "\t%d sensors still exist after unload. This may be due to Home Assistant's entity registry caching. Restart Home Assistant to fully clear these entities",
+                not_removed,
+            )
+        else:
+            _LOGGER.debug("\tAll BPS sensors removed successfully")
+
+        return True

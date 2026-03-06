@@ -1,6 +1,5 @@
 """Bluetooth Positioning System (BPS) integration for Home Assistant."""
 
-import asyncio
 import logging
 from pathlib import Path
 
@@ -8,17 +7,12 @@ import aiofiles
 import aiofiles.os
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import HomeAssistant, ServiceCall, callback
-from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.device_registry import EVENT_HOMEASSISTANT_STARTED
 
-from .data_classes import BPSMapData, BPSRuntimeData, BPSStoredData
-from .bps_map_data_updater import BPSMapDataUpdater
 from .bps_tri_data_updater import BPSTriDataUpdater
-from .bps_ui_manager import BPSUiManager
 from .const import DOMAIN, PLATFORMS
-
-# type BPSConfigEntry = ConfigEntry[BPSMapData, BPSRuntimeData]
+from .data_classes import BPSRuntimeData, BPSStoredData
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -49,90 +43,69 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     target_dir = Path().joinpath(hass.config.path(), "www", "bps_maps")
-    try:
-        await aiofiles.os.makedirs(target_dir, exist_ok=True)
-        _LOGGER.info("\tFolder %s has been created or already existed", target_dir)
-    except Exception as e:
-        _LOGGER.error("\tCould not create the folder %s: %s", target_dir, e, exc_info=e)
-        raise
+    if await aiofiles.os.path.exists(target_dir):
+        _LOGGER.debug("Folder %s already existed", target_dir)
+    else:
+        try:
+            await aiofiles.os.makedirs(target_dir, exist_ok=True)
+            _LOGGER.info("Folder %s has been created ", target_dir)
+        except Exception as e:
+            _LOGGER.error(
+                "Could not create the folder %s: %s", target_dir, e, exc_info=e
+            )
+            raise
 
-    updater = BPSTriDataUpdater(hass, hass.data[DOMAIN].map_data, entry.runtime_data)
-    hass.data["bps_initialized"] = True
-    hass.async_create_task(updater.update_tracked_entities())
+    if hass.data[DOMAIN].map_data.floors:
+        _LOGGER.debug("Map data already exists in stored data, skipping generation")
+    else:
+        _LOGGER.debug("Generating initial map data from HA registries")
+        hass.data[
+            DOMAIN
+        ].map_data = entry.runtime_data.bps_map_data_updater.generate_new_map_data()
+
     _LOGGER.info("The BPS integration is fully initialized")
 
-    # TODO:  Create task to call entry.runtime_data.bps_ui_manager.async_config() to set up the UI components for the integration
-    # hass.async_create_task(entry.runtime_data.bps_ui_manager.async_config())
-
     hass.services.async_register(DOMAIN, "bps_debug", handle_launch_debugger)
+    entry.async_on_unload(entry.add_update_listener(async_reload_entry))
 
-    async def handle_bermuda_state_change(event):
-        """Handle the Bermuda integration state change event."""
-        # hass.config_entries.async_entries('bermuda')[0].state == ConfigEntryState.LOADED
-        if event.data.get("new_state") == ConfigEntryState.LOADED:
-            _LOGGER.info(
-                "Bermuda integration has loaded, performing BPS post-start initialization tasks"
-            )
+    hass.async_create_background_task(
+        entry.runtime_data.bps_tri_data_updater.update_tracked_entities(),
+        "BPS Trilateration Updater Loop",
+    )
 
-            if not entry.runtime_data.floors:
-                hass.data[
-                    DOMAIN
-                ].map_data = (
-                    entry.runtime_data.bps_map_data_updater.generate_new_map_data()
-                )
-            entry.runtime_data.ready_to_collect = True
-            _LOGGER.info("BPS is now ready to collect data")
-        _LOGGER.info(
-            "Bermuda has started. Performing post-start initialization tasks for BPS"
-        )
-
-    if hass.config_entries.async_entries("bermuda")[0].state == ConfigEntryState.LOADED:
-        entry.runtime_data.ready_to_collect = True
-        _LOGGER.info("BPS is now ready to collect data")
-    else:
-        hass.config_entries.async_entries("bermuda")[0].async_on_unload(
-            hass.config_entries.async_entries("bermuda")[0].async_on_state_change(
-                handle_bermuda_state_change
-            )
-        )
+    # Example of seeing which config entries aren't loaded
+    # ce = self.hass.config_entries._entries
+    # for entry_id, entry in ce.data.items():
+    #     if entry.state.value != "loaded" and not entry.disabled_by:
+    #         mystr = f"{entry_id} - {entry.title} - {entry.state.value}"
+    #         print(mystr)
 
     return True
 
 
+async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Reload config entry."""
+    await async_unload_entry(hass, entry)
+    hass.config_entries.async_schedule_reload(entry.entry_id)
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Handle Home Assistant shutdown or integration reload."""
+
+    _LOGGER.debug("Unloading BPS Integration")
     entry.runtime_data.stop_integration = True
 
-    ui_unload = hass.async_create_task(entry.runtime_data.bps_ui_manager.async_unload())
+    if await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        _LOGGER.debug("Unloaded platforms successfully, proceeding with cleanup")
 
-    # TODO:  Sensors aren't being cleaned up on shutdown/reload, figure out why and fix it.  This is currently being done in async_unload_entry but should likely be handled in the sensor's async_will_remove_from_hass() method instead.
+    if await entry.runtime_data.bps_tri_data_updater.async_unload():
+        _LOGGER.debug("Trilateration data updater unloaded successfully")
 
-    _LOGGER.info("Removing sensors for integration unload")
-    entity_registry = er.async_get(hass)
+    if await entry.runtime_data.bps_map_data_updater.async_unload():
+        _LOGGER.debug("Map data updater unloaded successfully")
 
-    for entity_id in [
-        entity.entity_id
-        for entity in entity_registry.entities.values()
-        if entity.platform == "bps"
-    ]:
-        _LOGGER.info("\tRemoving sensor: %s", entity_id)
-        entity_registry.async_remove(entity_id)
-    _LOGGER.info("Done removing sensors")
+    if await entry.runtime_data.bps_ui_manager.async_unload():
+        _LOGGER.debug("UI manager unloaded successfully")
 
-    _LOGGER.info("Attempting to unload platforms for entry: %s", entry.entry_id)
-    try:  # Attempt to unload platforms
-        unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    except Exception as e:
-        _LOGGER.error(
-            "\tError during unloading of platforms for entry %s: %s",
-            entry.entry_id,
-            exc_info=e,
-        )
-        return False
-
-    if not unload_ok:
-        _LOGGER.error("\tFailed to unload platforms for entry: %s", entry.entry_id)
-        return False
-
-    await ui_unload
+    _LOGGER.debug("BPS Integration unloaded successfully")
     return True

@@ -21,12 +21,10 @@ class BPSMapData:
         self.areas = {}
         self.receivers = {}
 
-    def receivers_with_coords(self, map_data):
+    def receivers_with_coords(self):
         """Return a list of receiver IDs that have coordinates set (via the UI) for the given floor."""
         return [
-            rid
-            for rid, receiver in map_data.receivers.items()
-            if any(receiver["coords"])
+            rid for rid, receiver in self.receivers.items() if any(receiver["coords"])
         ]
 
 
@@ -59,14 +57,14 @@ class BPSRuntimeData:
         self.tricoords: dict = {}
         self.cache: dict = {}
         self.stop_integration: bool = False
-        self.ready_to_collect: bool = False
+
         self.bps_map_data_updater: BPSMapDataUpdater = BPSMapDataUpdater(
-            hass, self.integration_data.map_data, self
+            hass, self.integration_data, self
         )
         self.bps_tri_data_updater: BPSTriDataUpdater = BPSTriDataUpdater(
-            hass, self.integration_data.map_data, self
+            hass, self.integration_data, self
         )
         self.bps_ui_manager: BPSUiManager = BPSUiManager(
             hass, self.integration_data, self
         )
-        self.my_tracker_entities = []  # List to hold entity IDs of the tracker entities created by this integration
+        self.bps_tracker_entities = []  # List to hold entity IDs of the tracker entities created by this integration

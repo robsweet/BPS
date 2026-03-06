@@ -5,6 +5,7 @@ from __future__ import annotations
 # from aiohttp import web
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from homeassistant.components import panel_custom
 from homeassistant.components.frontend import (
@@ -23,8 +24,6 @@ from homeassistant.core import HomeAssistant
 # from homeassistant.helpers.template import Template
 from .const import DOMAIN
 
-from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:
     from .data_classes import BPSRuntimeData, BPSStoredData
 
@@ -41,17 +40,12 @@ class BPSUiManager:
 
         self.hass = hass
         self.bps_data = bps_data
-        self.map_data = bps_data.map_data
         self.runtime_data = runtime_data
 
-    async def async_config(self) -> bool:
-        """Configure the UI components for the integration."""
-
-        # Ensure the panel is registered.
-        _LOGGER.debug("\tBPS: Ensuring panel registration")
+    async def ensure_panel_js_exists_for_frontend(self, www_path):
+        """Ensure the necessary JS files exist for the frontend panel."""
 
         # Check if www directory exists
-        www_path = self.hass.config.path("custom_components/bps/frontend")
         try:
             js_file = Path().joinpath(www_path, "rob_test_panel.js")
             if not Path.exists(js_file):
@@ -63,10 +57,12 @@ class BPSUiManager:
             _LOGGER.exception("\t\tBPS: Error checking frontend files")
             return False
 
+    async def ensure_static_path_set_up_for_frontend(self, www_path):
+        """Ensure the static paths are set up to serve the frontend files."""
         # Register static paths to serve with the UI
         try:
             # Register static paths if not already registered
-            await self.hass.http.async_register_static_paths(
+            self.hass.http.async_register_static_paths(
                 [StaticPathConfig("/bps/", www_path, False)]
             )
             _LOGGER.debug("\t\tBPS: Static paths registered successfully")
@@ -76,7 +72,12 @@ class BPSUiManager:
                 "\t\tBPS: Static paths registration skipped or failed (likely already registered)"
             )
 
+    async def config_main_bps_panel(self):
+        """Configure the main BPS panel in the HA UI."""
         # Register panels for the UI with defensive error handling
+        # Ensure the panel is registered.
+        _LOGGER.debug("\tBPS: Ensuring panel registration")
+
         try:
             await panel_custom.async_register_panel(
                 self.hass,
@@ -105,6 +106,21 @@ class BPSUiManager:
             _LOGGER.exception("\t\tBPS: ❌ Unexpected error during panel registration")
             return False
 
+    async def async_config(self) -> bool:
+        """Configure the UI components for the integration."""
+
+        _LOGGER.debug("Starting BPS UI configuration")
+        www_path = Path().joinpath(self.hass.config.path(), "www", "bps_maps")
+        if not await self.ensure_panel_js_exists_for_frontend(www_path):
+            return False
+
+        if not await self.ensure_static_path_set_up_for_frontend(www_path):
+            return False
+
+        if not await self.config_main_bps_panel():
+            return False
+
+        _LOGGER.info("BPS UI configuration complete")
         return True
 
     async def async_unload(self) -> bool:

@@ -52,21 +52,29 @@ class CustomDistanceSensor(SensorEntity):
 async def async_setup_entry(hass: HomeAssistant, config_entry, async_add_entities):
     """Set dynamic sensors based on the filtered entities."""
     # _LOGGER.info("Setting up our own sensors for each tracked device")
+    await async_setup_platform(hass, config_entry, async_add_entities)
+    return True
 
-    if "bps_sensors" not in hass.data:
-        hass.data["bps_sensors"] = {}
+
+async def async_setup_platform(
+    hass: HomeAssistant, config, async_add_entities, discovery_info=None
+):
+    """Set up the sensor platform."""
 
     @callback
     def state_changed_listener(event):
         """Listen for state changes to update dynamic sensors."""
+        if "_distance_to_" not in event.data.get("entity_id"):
+            return  # Only care about entities that are relevant to our sensors
+
         new_entities = get_filtered_entities(hass)
         new_sensors = []
 
         entity_registry = er.async_get(hass)
 
-        existing_sensors = [
+        existing_bps_sensors = [
             entity.entity_id
-            for entity in entity_registry.entities.values()
+            for entity in list(entity_registry.entities.values())
             if entity.platform == "bps"
         ]
 
@@ -76,26 +84,22 @@ async def async_setup_entry(hass: HomeAssistant, config_entry, async_add_entitie
             unique_floor_id = f"sensor.{entity_id}_bps_floor"
             unique_floor_uid = f"bps_floor_{entity_id}"
 
-            if not any(s.startswith(unique_area_id) for s in existing_sensors):
+            if not any(s.startswith(unique_area_id) for s in existing_bps_sensors):
+                _LOGGER.debug("Creating new sensor for area: %s", unique_area_id)
                 sensor = CustomDistanceSensor(f"{entity_id} BPS Area", unique_area_uid)
-                hass.data["bps_sensors"][unique_area_id] = sensor
                 new_sensors.append(sensor)
+            else:
+                _LOGGER.debug("Sensor for area %s already exists", unique_area_id)
 
-            if not any(s.startswith(unique_floor_id) for s in existing_sensors):
+            if not any(s.startswith(unique_floor_id) for s in existing_bps_sensors):
+                _LOGGER.debug("Creating new sensor for floor: %s", unique_floor_id)
                 sensor = CustomDistanceSensor(
                     f"{entity_id} BPS Floor", unique_floor_uid
                 )
-                hass.data["bps_sensors"][unique_floor_id] = sensor
                 new_sensors.append(sensor)
+            else:
+                _LOGGER.debug("Sensor for floor %s already exists", unique_floor_id)
 
-        if new_sensors:
-            async_add_entities(new_sensors, update_before_add=True)
+        async_add_entities(new_sensors, update_before_add=True)
 
-    hass.bus.async_listen("state_changed", state_changed_listener)
-
-
-async def async_setup_platform(
-    hass: HomeAssistant, config, async_add_entities, discovery_info=None
-):
-    """If using configuration in configuration.yaml."""
-    await async_setup_entry(hass, config, async_add_entities)
+    return True
