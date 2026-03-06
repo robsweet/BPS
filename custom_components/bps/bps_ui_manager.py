@@ -1,5 +1,7 @@
 """Class to handle UI interactions for the BPS integration."""
 
+from __future__ import annotations
+
 # from aiohttp import web
 import logging
 from pathlib import Path
@@ -21,6 +23,11 @@ from homeassistant.core import HomeAssistant
 # from homeassistant.helpers.template import Template
 from .const import DOMAIN
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .data_classes import BPSRuntimeData, BPSStoredData
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -34,7 +41,7 @@ class BPSUiManager:
 
         self.hass = hass
         self.bps_data = bps_data
-        self.floor_data = bps_data.map_data
+        self.map_data = bps_data.map_data
         self.runtime_data = runtime_data
 
     async def async_config(self) -> bool:
@@ -46,7 +53,7 @@ class BPSUiManager:
         # Check if www directory exists
         www_path = self.hass.config.path("custom_components/bps/frontend")
         try:
-            js_file = Path.joinpath(www_path, "rob_test_panel.js")
+            js_file = Path().joinpath(www_path, "rob_test_panel.js")
             if not Path.exists(js_file):
                 _LOGGER.error("\t\tBPS: Frontend JS file missing at %s", js_file)
                 return False
@@ -65,7 +72,7 @@ class BPSUiManager:
             _LOGGER.debug("\t\tBPS: Static paths registered successfully")
         except Exception:
             # Static paths might already be registered, this is not critical
-            _LOGGER.exception(
+            _LOGGER.debug(
                 "\t\tBPS: Static paths registration skipped or failed (likely already registered)"
             )
 

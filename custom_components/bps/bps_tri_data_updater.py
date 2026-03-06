@@ -1,5 +1,7 @@
 """Module to handle trilateration data updates for BPS integration."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 
@@ -11,6 +13,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.template import Template
 
 from .const import DOMAIN
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .data_classes import BPSMapData, BPSRuntimeData
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -30,13 +37,13 @@ class BPSTriDataUpdater:
     def __init__(
         self,
         hass: HomeAssistant,
-        floor_data: BPSMapData,
+        map_data: BPSMapData,
         runtime_data: BPSRuntimeData,
         update_frequency=1,
     ) -> None:
         """Initialize the data updater."""
         self.hass = hass
-        self.floor_data = floor_data
+        self.map_data = map_data
         self.runtime_data = runtime_data
         self.update_frequency = update_frequency
 
@@ -48,28 +55,25 @@ class BPSTriDataUpdater:
     async def update_tracked_entities(self):
         """Update tracked_entities with the result of trilateration once per second."""
 
-        ## TODO:
-        ## Add floor_id to floor_data.receivers objects
-
         while not self.runtime_data.stop_integration:
             if not self.runtime_data.ready_to_collect:
                 await asyncio.sleep(self.update_frequency)
                 continue  # Wait until the system is ready to collect data
 
-            if not self.floor_data.floors:
+            if not self.map_data.floors:
                 self.hass.data[DOMAIN] = (
-                    self.runtime_data.bps_map_data_updater.generate_new_floor_data()
+                    self.runtime_data.bps_map_data_updater.generate_new_map_data()
                 )
 
-            if not any([floor.scale for floor in self.floor_data.floors.values()]):  # noqa: C419
+            if not any([floor.scale for floor in self.map_data.floors.values()]):  # noqa: C419
                 await self.cannot_trilaterate(
                     "No floors have scale data.  Maps probably haven't been set up in the BPS UI."
                 )
                 continue  # start over
 
-            if len(self.floor_data.receivers_with_coords(self.floor_data)) < 3:
+            if len(self.map_data.receivers_with_coords(self.map_data)) < 3:
                 await self.cannot_trilaterate(
-                    f"Only {len(self.floor_data.receivers_with_coords(self.floor_data))} receivers have coords.  Place at least 3 receivers in the BPS UI."
+                    f"Only {len(self.map_data.receivers_with_coords(self.map_data))} receivers have coords.  Place at least 3 receivers in the BPS UI."
                 )
                 continue  # start over
 
@@ -88,18 +92,18 @@ class BPSTriDataUpdater:
                 item.replace("sensor.", "").split("_distance_to_")
                 for item in bermuda_entities
             ]:
-                if not self.floor_data.receivers[receiver_id]["coords"]:
+                if not self.map_data.receivers[receiver_id]["coords"]:
                     _LOGGER.debug(
                         "Receiver %s has not been placed using the BPS UI", receiver_id
                     )
                     continue
 
-                if not self.floor_data.floors[
-                    self.floor_data.receivers[receiver_id]["floor"]
+                if not self.map_data.floors[
+                    self.map_data.receivers[receiver_id]["floor"]
                 ]["scale"]:
                     _LOGGER.debug(
                         "Scale not set for floor '%s'. Skipping receiver %s",
-                        self.floor_data.receivers[receiver_id]["floor"],
+                        self.map_data.receivers[receiver_id]["floor"],
                         receiver_id,
                     )
                     continue
@@ -137,15 +141,15 @@ class BPSTriDataUpdater:
         rcvr = {
             "state": self.hass.states.get(entity_id),
             "radius": None,
-            "coords": self.floor_data.receivers[receiver_id]["coords"],
+            "coords": self.map_data.receivers[receiver_id]["coords"],
         }
 
         if rcvr["state"] is None:
             _LOGGER.debug("Entity had no value: %s", entity_id)
         else:
             try:
-                scale = self.floor_data.floors[
-                    self.floor_data.receivers[receiver_id]["floor"]
+                scale = self.map_data.floors[
+                    self.map_data.receivers[receiver_id]["floor"]
                 ]["scale"]
                 state = float(rcvr["state"])
                 rcvr["radius"] = scale * state
@@ -164,7 +168,7 @@ class BPSTriDataUpdater:
         self.runtime_data.cache.setdefault("position_history", {})
 
         closest_floor_id = self.find_closest_floor_id(new_tricoords[tracker_id])
-        closest_floor_name = self.floor_data[closest_floor_id]["name"]
+        closest_floor_name = self.map_data[closest_floor_id]["name"]
 
         receiver_ids_on_floor = [
             receiver_id
@@ -234,9 +238,7 @@ class BPSTriDataUpdater:
         buffer_candidates = []
 
         for area in [
-            area
-            for area in self.floor_data.areas
-            if area["floor_id"] == closest_floor_id
+            area for area in self.map_data.areas if area["floor_id"] == closest_floor_id
         ]:
             polygon = Polygon([(coord["x"], coord["y"]) for coord in area["cords"]])
             xs = [coord["x"] for coord in area["cords"]]

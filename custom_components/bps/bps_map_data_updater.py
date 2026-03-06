@@ -1,7 +1,10 @@
 """Class to handle map data updates for BPS integration."""
 
+from __future__ import annotations
+
 import logging
 import re
+from typing import TYPE_CHECKING
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import (
@@ -10,6 +13,10 @@ from homeassistant.helpers import (
     # entity_registry as er,
     floor_registry as fr,
 )
+
+if TYPE_CHECKING:
+    from .data_classes import BPSMapData
+    from .data_classes import BPSRuntimeData
 
 # from homeassistant.helpers.template import Template
 
@@ -20,15 +27,15 @@ class BPSMapDataUpdater:
     """Class to handle map data updates from the UI for BPS integration."""
 
     def __init__(
-        self, hass: HomeAssistant, floor_data: BPSMapData, runtime_data: BPSRuntimeData
+        self, hass: HomeAssistant, map_data: BPSMapData, runtime_data: BPSRuntimeData
     ) -> None:
         """Initialize the data updater."""
 
         self.hass = hass
-        self.floor_data = floor_data
+        self.map_data = map_data
         self.runtime_data = runtime_data
 
-    def generate_new_floor_data(self):
+    def generate_new_map_data(self):
         """Generate new floor data structure from HA registries."""
 
         floor_reg = fr.async_get(self.hass)
@@ -89,6 +96,6 @@ class BPSMapDataUpdater:
     # TODO: Implement area change handling
     # TODO: Implement tracker change handling?
 
-    async def handle_update_floor_data(self, call: ServiceCall) -> None:
+    async def handle_update_map_data(self, call: ServiceCall) -> None:
         """Handle the listener callback."""
         pass
