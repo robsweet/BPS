@@ -19,13 +19,11 @@ class BPSMapData:
         """Initialize the BPS map data structure."""
         self.floors = {}
         self.areas = {}
-        self.receivers = {}
+        self.scanners = {}
 
-    def receivers_with_coords(self):
-        """Return a list of receiver IDs that have coordinates set (via the UI) for the given floor."""
-        return [
-            rid for rid, receiver in self.receivers.items() if any(receiver["coords"])
-        ]
+    def scanners_with_coords(self):
+        """Return a list of scanner IDs that have coordinates set (via the UI) for the given floor."""
+        return [rid for rid, scanner in self.scanners.items() if any(scanner["coords"])]
 
 
 @dataclass
@@ -38,6 +36,7 @@ class BPSStoredData:
     def __init__(self) -> None:
         """Initialize the BPS data structure."""
         self.map_data: BPSMapData = BPSMapData()
+        self.attic = {"floors": {}, "areas": {}, "scanners": {}, "bpsdata_file": {}}
 
 
 @dataclass
@@ -57,6 +56,7 @@ class BPSRuntimeData:
         self.tricoords: dict = {}
         self.cache: dict = {}
         self.stop_integration: bool = False
+        self.tracked = {}
 
         self.bps_map_data_updater: BPSMapDataUpdater = BPSMapDataUpdater(
             hass, self.integration_data, self

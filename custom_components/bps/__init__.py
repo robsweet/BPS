@@ -26,8 +26,6 @@ def handle_launch_debugger(call: ServiceCall) -> None:
     stored_data = hass.data[DOMAIN]  # noqa: F841
     runtime_data = hass.config_entries.async_entries(DOMAIN)[0].runtime_data  # noqa: F841
 
-    # TODO:  Figure out how to have a reasonable timeout for wait_for_client()
-
     debugpy.wait_for_client()  # noqa: T100
     debugpy.breakpoint()  # noqa: T100
     return None  # noqa: RET501 PLR1711
@@ -55,13 +53,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             raise
 
-    if hass.data[DOMAIN].map_data.floors:
-        _LOGGER.debug("Map data already exists in stored data, skipping generation")
-    else:
-        _LOGGER.debug("Generating initial map data from HA registries")
-        hass.data[
-            DOMAIN
-        ].map_data = entry.runtime_data.bps_map_data_updater.generate_new_map_data()
+    # if hass.data[DOMAIN].map_data.floors:
+    #     _LOGGER.debug("Map data already exists in stored data, skipping generation")
+    # else:
+    #     _LOGGER.debug("Generating initial map data from HA registries")
+    #     hass.data[
+    #         DOMAIN
+    #     ].map_data = entry.runtime_data.bps_map_data_updater.generate_new_map_data()
 
     _LOGGER.info("The BPS integration is fully initialized")
 

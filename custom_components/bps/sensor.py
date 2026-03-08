@@ -32,6 +32,7 @@ class CustomDistanceSensor(SensorEntity):
         self._name = name
         self._unique_id = unique_id
         self._state = "unknown"
+        self._attr_extra_state_attributes = {}
 
     @property
     def name(self):
@@ -47,6 +48,15 @@ class CustomDistanceSensor(SensorEntity):
     def state(self):
         """Return the state of the sensor."""
         return self._state
+
+    @property
+    def extra_state_attributes(self):
+        """Return entity specific state attributes."""
+        return self._attr_extra_state_attributes
+
+
+# Alternatively, using the attribute shorthand:
+# self._attr_extra_state_attributes = {"attribute_one": "value_one", ...}
 
 
 async def async_setup_entry(hass: HomeAssistant, config_entry, async_add_entities):
