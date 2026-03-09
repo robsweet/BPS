@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import TYPE_CHECKING
 
@@ -79,14 +80,18 @@ class BPSTriDataUpdater:
 
             new_tricoords = await self.gather_scanner_states()
 
+            import json
+
+            # print("Before: " + json.dumps(new_tricoords, sort_keys=True) + "\n")
+
             tracker_state_tasks = [
                 self.update_trilateration_and_area(new_tricoords, tracker_id)
                 for tracker_id in new_tricoords.keys()  # noqa: SIM118
                 if any(new_tricoords[tracker_id]["scanners"].values())
             ]
+            # print("After: " + json.dumps(new_tricoords, sort_keys=True) + "\n\n")
 
             await asyncio.gather(*tracker_state_tasks)
-            import json
 
             _LOGGER.debug(
                 "Completed trilateration and area updates, proceeding with state updates for %d trackers, %d scanners",
@@ -94,7 +99,7 @@ class BPSTriDataUpdater:
                 max([len(t["scanners"]) for t in new_tricoords.values()]),
             )
 
-            for tracker_id, tri_data in new_tricoords.items():
+            for tracker_id, tracker_data in new_tricoords.items():
                 if tracker_id not in self.runtime_data.tracked:
                     self.runtime_data.tracked[tracker_id] = next(
                         (
@@ -106,25 +111,25 @@ class BPSTriDataUpdater:
                     )
 
                 tracker_dev = self.runtime_data.tracked[tracker_id]
-
-                # TODO:  Figure out why we sometimes get here without setting tridata['area']
-                area = self.stored_data.map_data.areas.get(tri_data["area"], None)
+                area = self.stored_data.map_data.areas.get(
+                    tracker_data["area"]["entity_id"], None
+                )
 
                 self.hass.states.async_set(
                     f"sensor.{tracker_id}_bps_area",
-                    area.name if area else "unknown",
+                    area["name"] if area else "unknown",
                     {
                         "name": f"{tracker_dev.name} BPS Area",
                         "friendly_name": f"{tracker_dev.name} BPS Area",
                         "attribution": "Based on data from the Bermuda integration",
-                        "icon": area.icon if area else AREA_ICON,
+                        "icon": area["icon"] if area else AREA_ICON,
                     },
                     False,
                     # self._context,
                 )
                 self.hass.states.async_set(
                     f"sensor.{tracker_id}_bps_floor",
-                    tri_data.get("floor", "unknown"),
+                    tracker_data.get("floor", "unknown"),
                     {
                         "name": f"{tracker_dev.name} BPS Floor",
                         "friendly_name": f"{tracker_dev.name} BPS Floor",
@@ -157,6 +162,9 @@ class BPSTriDataUpdater:
             item.replace("sensor.", "").split("_distance_to_")
             for item in bermuda_entity_ids
         ]:
+            if tracker_id not in new_tricoords:
+                new_tricoords[tracker_id] = {"scanners": {}}
+
             if not self.stored_data.map_data.scanners[scanner_id]["coords"]:
                 _LOGGER.debug(
                     "Receiver %s has not been placed using the BPS UI", scanner_id
@@ -172,9 +180,6 @@ class BPSTriDataUpdater:
                     scanner_id,
                 )
                 continue
-
-            if tracker_id not in new_tricoords:
-                new_tricoords[tracker_id] = {"scanners": {}}
 
             new_tricoords[tracker_id]["scanners"][scanner_id] = {}
             scanner_state_tasks.append(
@@ -221,6 +226,8 @@ class BPSTriDataUpdater:
 
     async def update_trilateration_and_area(self, new_tricoords, tracker_id):
         """Trilateration with r-value filtering and moving average filtering."""
+
+        empty_tri_data = {"coords": {"x": None, "y": None}, "area": None, "floor": None}
 
         # _LOGGER.debug(
         #     "Starting trilateration and area update for tracker %s", tracker_id
@@ -274,6 +281,7 @@ class BPSTriDataUpdater:
             # _LOGGER.debug(
             #     "Cannot trilaterate for tracker %s: only %d valid points after r-value filtering"
             # )
+            new_tricoords[tracker_id] = empty_tri_data | new_tricoords[tracker_id]
             return
 
         tricords = self.trilaterate(
@@ -282,6 +290,7 @@ class BPSTriDataUpdater:
                 for rec in new_tricoords[tracker_id]["scanners"].values()
             ]
         )
+
         if tricords is not None:
             # Moving average filtering
             history = self.runtime_data.cache["position_history"].setdefault(
@@ -294,15 +303,15 @@ class BPSTriDataUpdater:
             avg_y = sum(pos[1] for pos in history) / len(history)
 
             test_point = Point(float(avg_x), float(avg_y))
+
+            # TODO Figure out why find_area_for_point isn't finding the kitchen
             area_id = self.find_area_for_point(closest_floor_id, test_point)
             new_tricoords[tracker_id]["coords"] = {"x": avg_x, "y": avg_y}
             new_tricoords[tracker_id]["area"] = area_id
             new_tricoords[tracker_id]["floor"] = closest_floor_name
 
         else:
-            new_tricoords[tracker_id]["coords"] = {"x": None, "y": None}
-            new_tricoords[tracker_id]["area"] = "unknown"
-            new_tricoords[tracker_id]["floor"] = closest_floor_name
+            new_tricoords[tracker_id] = empty_tri_data
 
     async def cannot_trilaterate(self, message):
         """Handle cases where trilateration can't be performed."""
@@ -334,6 +343,7 @@ class BPSTriDataUpdater:
                 polygon = Polygon(
                     [(coord["x"], coord["y"]) for coord in area["coords"]]
                 )
+
                 xs = [coord["x"] for coord in area["coords"]]
                 ys = [coord["y"] for coord in area["coords"]]
                 width = max(xs) - min(xs)

@@ -87,6 +87,12 @@ class BPSMapDataUpdater:
                     "x": 1000,
                     "y": 1000,
                 }
+                new_map_data.areas["kitchen"]["coords"] = [
+                    {"x": 300, "y": 300},
+                    {"x": 300, "y": 800},
+                    {"x": 800, "y": 800},
+                    {"x": 800, "y": 300},
+                ]
 
                 self.stored_data.map_data.floors = new_map_data.floors
                 self.stored_data.map_data.areas = new_map_data.areas
