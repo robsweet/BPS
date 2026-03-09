@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from .data_classes import BPSData, BPSRuntimeData
 
 _LOGGER = logging.getLogger(__name__)
+UNREASONABLE_RADIUS = 10000  # Set an unreasonably high radius for cases where the state is None or invalid, to be filtered out later
 
 
 class BPSTriDataUpdater:
@@ -111,25 +112,35 @@ class BPSTriDataUpdater:
                     )
 
                 tracker_dev = self.runtime_data.tracked[tracker_id]
-                area = self.stored_data.map_data.areas.get(
-                    tracker_data["area"]["entity_id"], None
-                )
+
+                area_name = "Unknown"
+                area_icon = AREA_ICON
+
+                print(json.dumps(tracker_data))
+
+                if tracker_data["area"]:
+                    area = self.stored_data.map_data.areas.get(
+                        tracker_data["area"]["entity_id"], None
+                    )
+                    if area:
+                        area_name = area["name"]
+                        area_icon = area["icon"]
 
                 self.hass.states.async_set(
                     f"sensor.{tracker_id}_bps_area",
-                    area["name"] if area else "unknown",
+                    area_name,
                     {
                         "name": f"{tracker_dev.name} BPS Area",
                         "friendly_name": f"{tracker_dev.name} BPS Area",
                         "attribution": "Based on data from the Bermuda integration",
-                        "icon": area["icon"] if area else AREA_ICON,
+                        "icon": area_icon,
                     },
                     False,
-                    # self._context,
                 )
+
                 self.hass.states.async_set(
                     f"sensor.{tracker_id}_bps_floor",
-                    tracker_data.get("floor", "unknown"),
+                    tracker_data["floor"] or "Unknown",
                     {
                         "name": f"{tracker_dev.name} BPS Floor",
                         "friendly_name": f"{tracker_dev.name} BPS Floor",
@@ -137,10 +148,10 @@ class BPSTriDataUpdater:
                         "icon": FLOOR_ICON,
                     },
                     False,
-                    # self._context,
                 )
 
             self.runtime_data.tricoords = new_tricoords
+
             await asyncio.sleep(
                 self.update_frequency
             )  # Run every X seconds, set timer in global variables
@@ -200,7 +211,7 @@ class BPSTriDataUpdater:
         rvcr_state = self.hass.states.get(entity_id)
         new_tricoords[tracker_id]["scanners"][scanner_id] = {
             "state": (rvcr_state.state if rvcr_state else None),
-            "radius": 10000,
+            "radius": UNREASONABLE_RADIUS,
             "coords": self.stored_data.map_data.scanners[scanner_id]["coords"],
         }
 
@@ -245,7 +256,12 @@ class BPSTriDataUpdater:
         closest_floor_id = self.find_closest_floor_id(
             new_tricoords[tracker_id]["scanners"]
         )
-        closest_floor_name = self.stored_data.map_data.floors[closest_floor_id]["name"]
+
+        closest_floor_name = (
+            self.stored_data.map_data.floors[closest_floor_id]["name"]
+            if closest_floor_id
+            else None
+        )
 
         scanner_ids_on_floor = [
             scanner_id
@@ -321,17 +337,19 @@ class BPSTriDataUpdater:
     def find_closest_floor_id(self, scanners):
         """Find closest floor from filtered scanner coords."""
         closest_scanner_id = min(scanners, key=lambda k: scanners[k]["radius"])
-        if self.stored_data.map_data.scanners[closest_scanner_id]["floor_id"]:
-            if self.stored_data.map_data.floors.get(
+        if (
+            any(
+                scanner["radius"] != UNREASONABLE_RADIUS
+                for scanner in scanners.values()
+            )
+            and self.stored_data.map_data.scanners[closest_scanner_id]["floor_id"]
+            and self.stored_data.map_data.floors.get(
                 self.stored_data.map_data.scanners[closest_scanner_id]["floor_id"]
-            ):
-                return self.stored_data.map_data.scanners[closest_scanner_id][
-                    "floor_id"
-                ]
-            else:
-                return "unknown"
-        else:
-            return "unknown"
+            )
+        ):
+            return self.stored_data.map_data.scanners[closest_scanner_id]["floor_id"]
+
+        return None
 
     def find_area_for_point(self, closest_floor_id, point):
         """Find area for point, prioritize correct polygon, select nearest buffer if no correct area matches."""
@@ -362,7 +380,7 @@ class BPSTriDataUpdater:
             buffer_candidates.sort()
             return buffer_candidates[0][1]
 
-        return "unknown"
+        return None
 
     # Trilateration function
     def trilaterate(self, known_points):
